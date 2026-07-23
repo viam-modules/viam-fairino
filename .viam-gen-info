@@ -1,0 +1,13 @@
+{
+  "module_name": "viam-fairino",
+  "visibility": "private",
+  "namespace": "3a94d2f9082b44ad8569a9d8a1330050",
+  "language": "go",
+  "resource_type": "component",
+  "resource_subtype": "arm",
+  "model_name": "fairino",
+  "initialize_git": false,
+  "generator_version": "0.1.0",
+  "generated_on": "2026-07-23T18:28:55.623028209Z",
+  "module_readme_link": "README.md"
+}

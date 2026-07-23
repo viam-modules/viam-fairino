@@ -1,0 +1,21 @@
+{
+  "$schema": "https://dl.viam.dev/module.schema.json",
+  "module_id": "3a94d2f9082b44ad8569a9d8a1330050:viam-fairino",
+  "visibility": "private",
+  "url": "",
+  "description": "Modular arm component: fairino",
+  "applications": null,
+  "markdown_link": "README.md",
+  "entrypoint": "bin/viam-fairino",
+  "first_run": "",
+  "build": {
+    "build": "make module.tar.gz",
+    "setup": "make setup",
+    "path": "module.tar.gz",
+    "arch": [
+      "linux/amd64",
+      "linux/arm64",
+      "darwin/arm64"
+    ]
+  }
+}
