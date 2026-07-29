@@ -1,5 +1,9 @@
 // Wire-format definitions for the Fairino controller's status feedback port
-// (TCP 8083), per "Robot 8083 Port Status Feedback User Manual" V3.9.7.
+// (TCP 8083), per "Robot 8083 Port Status Feedback User Manual" V3.9.7. The
+// bottom of the file also has the command port (TCP 8080) constants and
+// error table, per "Collaborative Robot Controller Communication Command
+// Protocol User Manual" V3.9.7 — command.go is to that section what
+// status.go is to the rest of this file.
 //
 // The controller pushes one frame per period (default 100 ms,
 // configurable 8–100 ms). Frame layout (manual Table 2-1, little-endian):
@@ -192,4 +196,211 @@ func readCString(buf []byte) string {
 		buf = buf[:i]
 	}
 	return string(buf)
+}
+
+// ---------------------------------------------------------------------------
+// Command port (TCP 8080) wire-format definitions, per "Collaborative Robot
+// Controller Communication Command Protocol User Manual" V3.9.7. I/O and
+// frame encode/decode live in command.go; this section is the readable
+// single source of truth for the constants that file uses, mirroring how
+// the status-port constants above relate to status.go.
+// ---------------------------------------------------------------------------
+
+// Frame markers (manual Table 1-1-1). Unlike the status port's binary
+// 0x5A5A header, these are literal ASCII text.
+const (
+	cmdFrameStart = "/f/b"
+	cmdFrameEnd   = "/b/f"
+	cmdFieldSep   = "III"
+)
+
+// Command numbers (CMD_ID) this module sends.
+const (
+	cmdIDMoveJ         = 201 // manual §2.1, Table 2-1
+	cmdIDStop          = 102 // manual §2.35, Table 2-48
+	cmdIDGetForwardKin = 377 // manual §6.3.24, Table 6-3-24
+
+	// cmdIDScriptError is NOT documented anywhere in the manual — found on
+	// real hardware. When a command handler fails, the controller's response
+	// frame doesn't echo the request's CMD_ID; it comes back as this CMD_ID
+	// instead, with DATA holding a Lua traceback of the form
+	// `[string "<the command text we sent>"]:1: robot errcode:<N>` (<N> is a
+	// normal Table 10-1 code — e.g. sending MoveJ() with a desc_pos that
+	// doesn't correspond to the joint target came back errcode 154, "the
+	// joint command point is incorrect"). This strongly suggests the
+	// controller runs incoming commands through a Lua interpreter rather
+	// than a hand-rolled parser, and 500 is its generic "script execution
+	// error" response — not specific to MoveJ. See scriptErrorFromData in
+	// command.go, which extracts the embedded errcode.
+	cmdIDScriptError = 500
+)
+
+// cmdErrorNames is the full controller error-code table from manual chapter
+// 10 ("Robot instruction interface error code", Table 10-1). Codes not
+// listed there (gaps in the manual's own numbering, e.g. 1-2, 53-58, 65,
+// 71-72, ...) fall through to cmdErrorString's "unknown error code N".
+var cmdErrorNames = map[int]string{
+	0:   "success",
+	3:   "the number of parameters is abnormal",
+	4:   "the parameter value is abnormal",
+	5:   "the tpd timer failed to start",
+	6:   "the tpd timer failed to close",
+	7:   "the tpd file creation failed",
+	8:   "the tpd file does not exist",
+	9:   "the tpd file name was not sent successfully",
+	10:  "the content of tpd file failed to send",
+	11:  "the program is abnormal and parsing stops",
+	12:  "the contents of the tpd file are inconsistent",
+	13:  "the number of points in the tpd file is abnormal",
+	14:  "the instruction execution failed",
+	15:  "the number of tpd record points is out of limit",
+	16:  "the protocol has already been loaded",
+	17:  "the protocol is not loaded",
+	18:  "the program is running",
+	19:  "the posture sensor communication is abnormal",
+	20:  "the tool is not set for welding",
+	21:  "the external shaft is not deactivated",
+	22:  "the three-point method does not set up the tool",
+	23:  "position sensor data acquisition failed",
+	24:  "eight-point method: the first four points have too much posture change",
+	25:  "calculation failed",
+	26:  "eight-point method: not switched to the base coordinate system",
+	27:  "eight-point method: the calculation result is abnormal",
+	28:  "the results of inverse kinematics calculation are abnormal",
+	29:  "ServoJ joint over limit",
+	30:  "reset failed, please restart the control box",
+	31:  "emergency stop released — please disconnect power and restart the control box",
+	32:  "joint over-limit",
+	33:  "the external axis is not at zero, so the guide/resolution settings failed",
+	34:  "workpiece number error",
+	35:  "please switch to workpiece number 0",
+	36:  "the file name is too long",
+	37:  "tool number error",
+	38:  "strange posture",
+	39:  "socket name is invalid",
+	40:  "speed percentage exceeds limit",
+	41:  "the external shaft has not returned to zero",
+	42:  "the posture changes too much",
+	43:  "the conveyor belt detection switch DI is not configured",
+	44:  "the robot's attitude angle is out of limit",
+	45:  "the external axis is not activated",
+	46:  "the synchronization function requires calibration of the external axis",
+	47:  "external driver information configuration failed",
+	48:  "external shaft drive information configuration timed out",
+	49:  "external shaft error, cannot be enabled",
+	50:  "failed to obtain information from the external axis driver",
+	51:  "external shaft driver information acquisition timed out",
+	52:  "the synchronization function cannot be used for single-step operation",
+	59:  "the force/torque sensor is not activated",
+	60:  "the force/torque sensor's reference coordinate system has not been switched to the tool",
+	61:  "the force/torque sensor is not set to zero",
+	62:  "the load of the torque sensor is not set to zero",
+	63:  "failed to obtain system time",
+	64:  "not added to instruction queue",
+	66:  "the midpoint 1 of the circular/spiral instruction is incorrect",
+	67:  "the midpoint 2 of the circular/spiral instruction is incorrect",
+	68:  "the midpoint 3 of the circular/spiral instruction is incorrect",
+	69:  "the midpoint of the arc instruction is incorrect",
+	70:  "the target point of the arc instruction is incorrect",
+	73:  "claw movement error",
+	74:  "the linear command point is incorrect",
+	75:  "channel error",
+	76:  "waiting for timeout",
+	82:  "TPD instruction point error",
+	83:  "the TPD directive tool is not compatible with the current tool",
+	84:  "weld seam location failed",
+	85:  "line directive error",
+	90:  "external axis configuration file check failed",
+	91:  "the peripheral configuration file version does not match",
+	92:  "the peripheral configuration file read failed",
+	93:  "the number of spline instruction points is out of limit",
+	94:  "the spline instruction point is incorrect",
+	95:  "the spline parameters are incorrect",
+	96:  "wire positioning failed",
+	97:  "the recorded data is empty",
+	98:  "the main program is not configured",
+	99:  "the security stop has been triggered",
+	100: "the job origin has not been configured",
+	101: "the robot is not enabled",
+	106: "the external shaft is not enabled",
+	108: "the starting point of the helix command is incorrect",
+	110: "close the drag configuration / impedance callback to enter the interference area",
+	111: "please turn off the drag teaching lock-free-degree function",
+	112: "the positioning posture cannot be reached",
+	114: "the DMP instruction point is incorrect",
+	115: "circular motion instruction point error",
+	116: "the extended axis peripheral communication driver is not loaded",
+	118: "the load weight of the force sensor is incorrect",
+	119: "the load center of gravity is wrong under the force sensor",
+	120: "the trajectory command point is incorrect",
+	121: "the number of trajectory points is 0",
+	122: "joint torque exceeds limit",
+	123: "please exit drag mode first",
+	124: "the extended axis parameters are not configured",
+	125: "recovery of welding failed: the original program failed",
+	126: "recovery welding failed: unable to obtain the restart arc point",
+	127: "restore welding failed: unable to generate restore program",
+	128: "not in manual mode / stopped",
+	129: "please switch to the new dynamics mode first",
+	130: "the point table does not exist",
+	133: "please switch to drag mode / force-sensor-assisted drag mode first",
+	134: "the force/torque sensor is unloaded",
+	135: "the inverse of the force/torque sensor's matrix is abnormal",
+	138: "the detection switch DI is not configured",
+	139: "please apply the extended axis coordinate system first",
+	140: "please activate the current extension axis first",
+	143: "the teaching point information does not exist",
+	144: "the LUA file does not exist",
+	151: "the joint configuration changed",
+	152: "the spacing between welding instruction points is too small",
+	153: "the spacing between arc instructions is too small",
+	154: "the joint command point is incorrect",
+	155: "the background program failed to start",
+	156: "the background program failed to pause",
+	157: "the background program failed to resume",
+	158: "the background program deletion failed",
+	159: "the number of background programs running exceeds 8",
+	160: "the speed profile validation failed",
+	161: "load profile validation failed",
+	162: "the extended axis in laser tracking cannot move asynchronously",
+	163: "the welding procedure contains multiple while statements",
+	164: "segment welding information not returned",
+	165: "CNC communication error",
+	166: "CNC timeout",
+	167: "CNC communication connection timed out",
+	168: "the number of monitored numeric variables exceeds the limit",
+	169: "the number of monitored character variables exceeds the limit",
+	170: "workpiece coordinate system not applied",
+	171: "all joints must be moved within the soft limit range",
+	172: "motion speed cannot be 0",
+	173: "acceleration smoothing must be enabled for extended axis blend motion",
+	174: "current robot model does not support this function",
+	175: "socket not configured",
+	176: "socket communication connected",
+	177: "socket communication not connected",
+	178: "firmware version too high, current software version not supported",
+	179: "firmware version too low, current software version not supported",
+	180: "G-code file cannot be opened",
+	181: "G-code parsing failed",
+	182: "given physical speed exceeds limit",
+	183: "given physical acceleration exceeds limit",
+	184: "external axis enable failed",
+	185: "motion stopped by error signal",
+	186: "motion stopped by emergency stop signal",
+	187: "collision level too low",
+	188: "force control and impedance control both enabled",
+	189: "kernel upgrade version verification failed",
+	190: "kernel version upgrade failed",
+	191: "linear rack guide not activated",
+	192: "linear rack guide collision detection is only supported for upright installation",
+	193: "torque control speed exceeds limit",
+	194: "torque control power exceeds limit",
+	195: "FR30L base tilt angle must be 0",
+}
+
+func cmdErrorString(code int) string {
+	if s, ok := cmdErrorNames[code]; ok {
+		return s
+	}
+	return fmt.Sprintf("unknown error code %d", code)
 }

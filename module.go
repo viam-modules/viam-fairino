@@ -1,13 +1,19 @@
 // Package viamfairino implements a Fairino FR5-WML as a Viam arm component.
 //
-// Phase 1 (current): status feedback only. A statusClient (status.go) reads
-// the controller's 8083 broadcast and backs the read-only arm.Arm methods
-// (JointPositions, CurrentInputs, IsMoving, Status, DoCommand status dump).
-// Motion, kinematics, and geometry are stubbed pending Phases 2–3 — see
-// PLAN.md.
+// A statusClient (status.go) reads the controller's 8083 status broadcast
+// and backs the read-only arm.Arm methods (JointPositions, CurrentInputs,
+// IsMoving, Status, DoCommand status dump). A commandClient (command.go)
+// sends motion commands on the controller's 8080 command port; so far only
+// MoveToJointPositions uses it. Kinematics returns a joint-limits-only model
+// (kinematics.go) — just enough for arm.CheckDesiredJointPositions to reject
+// out-of-range targets, not a real link chain. Everything else that would
+// need either the command port (Cartesian/multi-waypoint motion, Stop) or a
+// full link/geometry model (EndPosition, Geometries, Get3DModels) is still
+// stubbed.
 //
-// The wire protocol uses degrees and millimeters (statusdef.go/status.go);
-// all conversion to radians/SI happens in this file, at the arm.Arm boundary.
+// The wire protocols use degrees and millimeters (constants.go/status.go/
+// command.go); all conversion to radians/SI happens in this file, at the
+// arm.Arm boundary.
 package viamfairino
 
 import (
@@ -19,6 +25,7 @@ import (
 	commonpb "go.viam.com/api/common/v1"
 	arm "go.viam.com/rdk/components/arm"
 	"go.viam.com/rdk/logging"
+	"go.viam.com/rdk/operation"
 	"go.viam.com/rdk/referenceframe"
 	"go.viam.com/rdk/resource"
 	"go.viam.com/rdk/spatialmath"
@@ -40,14 +47,42 @@ type Config struct {
 	// Fairino factory default). The controller's ports are fixed (status
 	// 8083, commands 8080) and deliberately not configurable.
 	Host string `json:"host,omitempty"`
+
+	// ToolNum and WorkpieceNum select the active tool/workpiece coordinate
+	// frame (manual: 0-14 each) used for MoveJ's toolNum/workPieceNum
+	// fields. Default 0 (no tool, base workpiece) for both — since that's
+	// also the zero value, there's no separate "unset" sentinel needed.
+	ToolNum      int `json:"tool_num,omitempty"`
+	WorkpieceNum int `json:"workpiece_num,omitempty"`
+
+	// JointSpeedPercent is the MoveJ "speed" field (manual: 1-100). Zero
+	// (unset) defaults to 20, matching fairino-python-sdk's own MoveJ
+	// default (vel=20.0) — not otherwise documented as a controller-side
+	// default, so this module picks the same value the vendor SDK does.
+	JointSpeedPercent int `json:"joint_speed_percent,omitempty"`
 }
 
 // Validate ensures all parts of the config are valid. Host is optional (it
 // has a default) and any non-empty value is accepted as-is — a bad address
 // surfaces as a dial error from the status client.
 func (cfg *Config) Validate(path string) ([]string, []string, error) {
+	for name, v := range map[string]int{
+		"tool_num":      cfg.ToolNum,
+		"workpiece_num": cfg.WorkpieceNum,
+	} {
+		if v < 0 || v > 14 {
+			return nil, nil, fmt.Errorf("%s: %s must be between 0 and 14, got %d", path, name, v)
+		}
+	}
+	if v := cfg.JointSpeedPercent; v < 0 || v > 100 {
+		return nil, nil, fmt.Errorf("%s: joint_speed_percent must be between 1 and 100, got %d", path, v)
+	}
 	return nil, nil, nil
 }
+
+// defaultJointSpeedPercent is used when Config.JointSpeedPercent is unset
+// (zero value) — see that field's doc comment.
+const defaultJointSpeedPercent = 20
 
 type viamFairinoFairino struct {
 	resource.AlwaysRebuild
@@ -57,6 +92,9 @@ type viamFairinoFairino struct {
 	cfg    *Config
 
 	status *statusClient
+	cmd    *commandClient
+	opMgr  *operation.SingleOperationManager
+	model  referenceframe.Model // joint-limits-only; see kinematics.go
 
 	cancelCtx  context.Context
 	cancelFunc func()
@@ -79,11 +117,23 @@ func NewFairino(ctx context.Context, deps resource.Dependencies, name resource.N
 		host = defaultHost
 	}
 
+	// Joint-limits-only model (kinematics.go) — a fixed set of hardcoded
+	// constants, not hardware-dependent, so a failure here means an actual
+	// bug rather than an environmental condition; fail the constructor
+	// rather than degrading gracefully like the status/command clients do.
+	model, err := makeJointLimitModel()
+	if err != nil {
+		return nil, fmt.Errorf("building joint limit model: %w", err)
+	}
+
 	s := &viamFairinoFairino{
 		name:       name,
 		logger:     logger,
 		cfg:        conf,
 		status:     newStatusClient(host, statusPort, logger),
+		cmd:        newCommandClient(host, commandPort, logger),
+		opMgr:      operation.NewSingleOperationManager(),
+		model:      model,
 		cancelCtx:  cancelCtx,
 		cancelFunc: cancelFunc,
 	}
@@ -237,8 +287,193 @@ func ftData(payload []byte) []interface{} {
 	return out
 }
 
+// ---------- arm.Arm: motion ----------
+
+// Motion-completion polling constants, mirroring viam-dobot's
+// waitForMotionCompleteLocked (arm/cr10a.go there) adapted to Fairino's
+// statusFrame. motionPollInterval matches the poll cadence status.go's own
+// waitForFrame already uses elsewhere in this package.
+const (
+	motionPollInterval = 20 * time.Millisecond
+
+	// motionStartGrace is how long we wait after a MoveJ ack for MotionDone
+	// to flip false (motion actually started) before falling through to the
+	// completion poll anyway — covers zero-distance moves and commands that
+	// finish faster than our poll cadence.
+	motionStartGrace = 200 * time.Millisecond
+
+	// jointToleranceDeg is the per-joint slop accepted when confirming a
+	// completed move actually reached its target, degrees.
+	jointToleranceDeg = 0.5
+)
+
+// MoveToJointPositions moves the arm's joints to the given positions via a
+// single blocking MoveJ() (manual §2.1). It returns once the controller
+// reports the move complete (statusFrame.MotionDone) and the joints are
+// within tolerance of the target, or once ctx is cancelled — in which case
+// it sends STOP before returning ctx.Err(), mirroring viam-dobot's
+// cancellation handling.
+func (s *viamFairinoFairino) MoveToJointPositions(ctx context.Context, positions []referenceframe.Input, extra map[string]interface{}) error {
+	moveStart := time.Now()
+	// TEMP verbose bring-up logging — pare back to Debug once MoveJ is
+	// confirmed working end-to-end on hardware.
+	s.logger.Infow("MoveToJointPositions: called", "positions_rad", positions, "extra", extra)
+
+	if len(positions) != 6 {
+		return fmt.Errorf("expected 6 joint inputs, got %d", len(positions))
+	}
+	// Validates against kinematics.go's joint-limits-only model — this is
+	// the whole reason that model exists (see its doc comment). Checked
+	// before opMgr.New/GetForwardKin so an out-of-range target fails fast
+	// without touching the wire at all.
+	if err := arm.CheckDesiredJointPositions(ctx, s, positions); err != nil {
+		s.logger.Infow("MoveToJointPositions: rejected by joint limit check", "err", err)
+		return err
+	}
+
+	ctx, done := s.opMgr.New(ctx)
+	defer done()
+
+	var targetDeg [6]float64
+	for i := 0; i < 6; i++ {
+		targetDeg[i] = rdkutils.RadToDeg(positions[i])
+	}
+	s.logger.Infow("MoveToJointPositions: target", "target_deg", targetDeg)
+
+	// desc_pos: see moveJParams.Pose's doc comment in command.go — the
+	// controller validates this against the joint target, so it must be the
+	// real forward-kinematics pose for targetDeg, not a placeholder. Fetched
+	// from the controller itself (GetForwardKin) rather than computed
+	// locally, since this module has no kinematic model yet.
+	targetPose, err := s.cmd.getForwardKin(ctx, targetDeg)
+	if err != nil {
+		s.logger.Infow("MoveToJointPositions: GetForwardKin failed", "err", err)
+		return fmt.Errorf("GetForwardKin: %w", err)
+	}
+	s.logger.Infow("MoveToJointPositions: forward kinematics for target", "target_deg", targetDeg, "target_pose", targetPose)
+
+	params := moveJParams{
+		Joints:       targetDeg,
+		Pose:         targetPose,
+		ToolNum:      s.cfg.ToolNum,
+		WorkPieceNum: s.cfg.WorkpieceNum,
+		SpeedPercent: float64(orDefaultInt(s.cfg.JointSpeedPercent, defaultJointSpeedPercent)),
+		AccelPercent: 0, // reserved/non-functional on the controller — see moveJParams.AccelPercent
+		OverridePct:  100,
+		BlendT:       -1, // block at this single target; see moveJParams.BlendT
+	}
+
+	if err := s.cmd.moveJ(ctx, params); err != nil {
+		s.logger.Infow("MoveToJointPositions: MoveJ ack failed", "elapsed", time.Since(moveStart), "err", err)
+		return fmt.Errorf("MoveJ: %w", err)
+	}
+	s.logger.Infow("MoveToJointPositions: MoveJ acknowledged, waiting for motion to complete", "elapsed", time.Since(moveStart))
+
+	err = s.waitForMotionComplete(ctx, targetDeg)
+	s.logger.Infow("MoveToJointPositions: done", "elapsed", time.Since(moveStart), "err", err)
+	return err
+}
+
+// waitForMotionComplete polls the status stream until the controller
+// reports the move done (statusFrame.MotionDone) and the joints are within
+// jointToleranceDeg of targetDeg, or returns an error if the controller
+// e-stops or latches a fault mid-move. On ctx cancellation it issues STOP
+// on a fresh short-lived context before returning ctx.Err(), same shape as
+// viam-dobot's waitForMotionCompleteLocked.
+func (s *viamFairinoFairino) waitForMotionComplete(ctx context.Context, targetDeg [6]float64) error {
+	// TEMP verbose bring-up logging throughout this function — logs every
+	// poll tick, which is deliberately spammy while we're confirming
+	// MotionDone/JointDegs actually behave the way the manual says during a
+	// real move. Pare back to Debug (or drop the per-tick logs entirely)
+	// once that's confirmed.
+	pollStart := time.Now()
+	s.logger.Infow("waitForMotionComplete: entering start-grace phase", "grace", motionStartGrace)
+
+	startCtx, cancelGrace := context.WithTimeout(ctx, motionStartGrace)
+	defer cancelGrace()
+	for {
+		fr, ok, _ := s.status.latest()
+		s.logger.Infow("waitForMotionComplete: start-grace poll", "have_frame", ok,
+			"motion_done", fr.MotionDone, "joint_deg", fr.JointDegs, "e_stop", fr.EmergencyStop)
+		if ok && !fr.MotionDone {
+			s.logger.Infow("waitForMotionComplete: motion started", "elapsed", time.Since(pollStart))
+			break // motion has started
+		}
+		if ok && fr.EmergencyStop {
+			return errors.New("Fairino controller is e-stopped — motion did not start")
+		}
+		select {
+		case <-startCtx.Done():
+			// No transition seen within the grace window — fall through to
+			// the completion poll anyway; covers zero-distance moves.
+			s.logger.Infow("waitForMotionComplete: start-grace window elapsed with no MotionDone transition, falling through to completion poll", "elapsed", time.Since(pollStart))
+			goto completed
+		case <-time.After(motionPollInterval):
+		}
+	}
+completed:
+
+	for {
+		select {
+		case <-ctx.Done():
+			s.logger.Infow("waitForMotionComplete: ctx cancelled, sending STOP", "elapsed", time.Since(pollStart), "ctx_err", ctx.Err())
+			stopCtx, cancelStop := context.WithTimeout(context.Background(), 2*time.Second)
+			_ = s.cmd.stop(stopCtx)
+			cancelStop()
+			return ctx.Err()
+		case <-time.After(motionPollInterval):
+		}
+
+		fr, ok, _ := s.status.latest()
+		if !ok {
+			s.logger.Infow("waitForMotionComplete: completion poll — no status frame yet", "elapsed", time.Since(pollStart))
+			continue
+		}
+		s.logger.Infow("waitForMotionComplete: completion poll", "elapsed", time.Since(pollStart),
+			"motion_done", fr.MotionDone, "joint_deg", fr.JointDegs, "target_deg", targetDeg,
+			"error_code", fr.ErrorCode, "e_stop", fr.EmergencyStop)
+		if fr.EmergencyStop {
+			return errors.New("Fairino controller e-stopped during motion")
+		}
+		if fr.ErrorCode != 0 {
+			return fmt.Errorf("Fairino controller reported a fault during motion: %s", faultCodeString(fr.ErrorCode))
+		}
+		if fr.MotionDone {
+			if jointsCloseDeg(fr.JointDegs, targetDeg, jointToleranceDeg) {
+				s.logger.Infow("waitForMotionComplete: motion complete, joints within tolerance", "elapsed", time.Since(pollStart), "joint_deg", fr.JointDegs)
+				return nil
+			}
+			s.logger.Infow("waitForMotionComplete: motion done but joints out of tolerance", "elapsed", time.Since(pollStart), "joint_deg", fr.JointDegs, "target_deg", targetDeg)
+			return fmt.Errorf("motion completed but joints did not reach target (got %v want %v degrees)", fr.JointDegs, targetDeg)
+		}
+	}
+}
+
+func jointsCloseDeg(a, b [6]float64, tolDeg float64) bool {
+	for i := 0; i < 6; i++ {
+		d := a[i] - b[i]
+		if d < 0 {
+			d = -d
+		}
+		if d > tolDeg {
+			return false
+		}
+	}
+	return true
+}
+
+// orDefaultInt returns def when v is the zero value, else v — for Config
+// fields whose valid range excludes 0 (see Config.JointSpeedPercent).
+func orDefaultInt(v, def int) int {
+	if v == 0 {
+		return def
+	}
+	return v
+}
+
 func (s *viamFairinoFairino) Close(context.Context) error {
 	s.status.stop()
+	_ = s.cmd.close()
 	s.cancelFunc()
 	return nil
 }
@@ -246,26 +481,28 @@ func (s *viamFairinoFairino) Close(context.Context) error {
 // ---------- stubbed methods (Phases 2–3, see PLAN.md) ----------
 
 // errPhase2 marks methods that need the command port (8080) client.
-var errPhase2 = errors.New("not implemented in phase 1 (status-only); motion via the command port is planned for phase 2 — see PLAN.md")
+// MoveToJointPositions (below) is the first exception — everything else
+// that needs the command port is still stubbed.
+var errPhase2 = errors.New("not implemented yet; motion via the command port is planned but not yet built for this method")
 
-// errPhase3 marks methods that need the FR5-WML kinematics/geometry models.
-var errPhase3 = errors.New("not implemented in phase 1 (status-only); kinematics and geometry are planned for phase 3 — see PLAN.md")
+// errPhase3 marks methods that need a full FR5-WML link/geometry model
+// (URDF or equivalent). Kinematics is NOT in this list — it now returns a
+// joint-limits-only model (kinematics.go) — but EndPosition/Geometries/
+// Get3DModels need real link geometry, which that model deliberately
+// doesn't have.
+var errPhase3 = errors.New("not implemented yet; needs a full link/geometry model, not just joint limits")
 
 // EndPosition returns the current position of the arm. Deliberately stubbed
 // rather than serving the device-reported TCP (tl_cur_pos): its Euler
-// convention is unverified, and phase 3 implements this via kinematic-model
-// forward kinematics instead.
+// convention is unverified, and a real kinematic model would implement this
+// via forward kinematics instead. kinematics.go's model can't help here —
+// it carries joint limits only, no link geometry to compute a pose from.
 func (s *viamFairinoFairino) EndPosition(ctx context.Context, extra map[string]interface{}) (spatialmath.Pose, error) {
 	return nil, errPhase3
 }
 
 // MoveToPosition moves the arm to the given absolute position.
 func (s *viamFairinoFairino) MoveToPosition(ctx context.Context, pose spatialmath.Pose, extra map[string]interface{}) error {
-	return errPhase2
-}
-
-// MoveToJointPositions moves the arm's joints to the given positions.
-func (s *viamFairinoFairino) MoveToJointPositions(ctx context.Context, positions []referenceframe.Input, extra map[string]interface{}) error {
 	return errPhase2
 }
 
@@ -282,8 +519,13 @@ func (s *viamFairinoFairino) Stop(ctx context.Context, extra map[string]interfac
 	return errPhase2
 }
 
+// Kinematics returns the joint-limits-only model built in kinematics.go.
+// It exists specifically so arm.CheckDesiredJointPositions (used by
+// MoveToJointPositions) has real per-joint limits to validate against — it
+// is NOT a real kinematic chain and Transform()/Geometries() on it should
+// not be trusted for anything beyond DoF()/limits.
 func (s *viamFairinoFairino) Kinematics(ctx context.Context) (referenceframe.Model, error) {
-	return nil, errPhase3
+	return s.model, nil
 }
 
 func (s *viamFairinoFairino) Geometries(ctx context.Context, extra map[string]interface{}) ([]spatialmath.Geometry, error) {
