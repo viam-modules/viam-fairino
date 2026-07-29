@@ -94,7 +94,6 @@ type viamFairinoFairino struct {
 	status *statusClient
 	cmd    *commandClient
 	opMgr  *operation.SingleOperationManager
-	model  referenceframe.Model // joint-limits-only; see kinematics.go
 
 	cancelCtx  context.Context
 	cancelFunc func()
@@ -117,15 +116,6 @@ func NewFairino(ctx context.Context, deps resource.Dependencies, name resource.N
 		host = defaultHost
 	}
 
-	// Joint-limits-only model (kinematics.go) — a fixed set of hardcoded
-	// constants, not hardware-dependent, so a failure here means an actual
-	// bug rather than an environmental condition; fail the constructor
-	// rather than degrading gracefully like the status/command clients do.
-	model, err := makeJointLimitModel()
-	if err != nil {
-		return nil, fmt.Errorf("building joint limit model: %w", err)
-	}
-
 	s := &viamFairinoFairino{
 		name:       name,
 		logger:     logger,
@@ -133,7 +123,6 @@ func NewFairino(ctx context.Context, deps resource.Dependencies, name resource.N
 		status:     newStatusClient(host, statusPort, logger),
 		cmd:        newCommandClient(host, commandPort, logger),
 		opMgr:      operation.NewSingleOperationManager(),
-		model:      model,
 		cancelCtx:  cancelCtx,
 		cancelFunc: cancelFunc,
 	}
@@ -318,18 +307,6 @@ func (s *viamFairinoFairino) MoveToJointPositions(ctx context.Context, positions
 	// TEMP verbose bring-up logging — pare back to Debug once MoveJ is
 	// confirmed working end-to-end on hardware.
 	s.logger.Infow("MoveToJointPositions: called", "positions_rad", positions, "extra", extra)
-
-	if len(positions) != 6 {
-		return fmt.Errorf("expected 6 joint inputs, got %d", len(positions))
-	}
-	// Validates against kinematics.go's joint-limits-only model — this is
-	// the whole reason that model exists (see its doc comment). Checked
-	// before opMgr.New/GetForwardKin so an out-of-range target fails fast
-	// without touching the wire at all.
-	if err := arm.CheckDesiredJointPositions(ctx, s, positions); err != nil {
-		s.logger.Infow("MoveToJointPositions: rejected by joint limit check", "err", err)
-		return err
-	}
 
 	ctx, done := s.opMgr.New(ctx)
 	defer done()
@@ -525,7 +502,7 @@ func (s *viamFairinoFairino) Stop(ctx context.Context, extra map[string]interfac
 // is NOT a real kinematic chain and Transform()/Geometries() on it should
 // not be trusted for anything beyond DoF()/limits.
 func (s *viamFairinoFairino) Kinematics(ctx context.Context) (referenceframe.Model, error) {
-	return s.model, nil
+	return nil, errPhase2
 }
 
 func (s *viamFairinoFairino) Geometries(ctx context.Context, extra map[string]interface{}) ([]spatialmath.Geometry, error) {
