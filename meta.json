@@ -1,8 +1,8 @@
 {
   "$schema": "https://dl.viam.dev/module.schema.json",
-  "module_id": "3a94d2f9082b44ad8569a9d8a1330050:viam-fairino",
+  "module_id": "viam-soleng:viam-fairino",
   "visibility": "private",
-  "url": "",
+  "url": "https://github.com/viam-modules/viam-fairino",
   "description": "Modular arm component: fairino",
   "applications": null,
   "markdown_link": "README.md",
