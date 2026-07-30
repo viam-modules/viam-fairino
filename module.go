@@ -4,12 +4,13 @@
 // and backs the read-only arm.Arm methods (JointPositions, CurrentInputs,
 // IsMoving, Status, DoCommand status dump). A commandClient (command.go)
 // sends motion commands on the controller's 8080 command port; so far only
-// MoveToJointPositions uses it. Kinematics returns a joint-limits-only model
-// (kinematics.go) — just enough for arm.CheckDesiredJointPositions to reject
-// out-of-range targets, not a real link chain. Everything else that would
-// need either the command port (Cartesian/multi-waypoint motion, Stop) or a
-// full link/geometry model (EndPosition, Geometries, Get3DModels) is still
-// stubbed.
+// MoveToJointPositions uses it. Kinematics returns a real link/geometry
+// model (kinematics.go), parsed from the URDF shipped in the module tarball
+// (arm/fr5wm.urdf — see PLAN.md Steps 0-5 for how that URDF was derived and
+// validated); Geometries and Get3DModels both use that same model and its
+// bundled meshes. EndPosition is still stubbed (design pending, see its own
+// doc comment), as is everything that needs the command port for motion
+// beyond MoveToJointPositions (Cartesian/multi-waypoint motion, Stop).
 //
 // The wire protocols use degrees and millimeters (constants.go/status.go/
 // command.go); all conversion to radians/SI happens in this file, at the
@@ -20,6 +21,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
+	"sync"
 	"time"
 
 	commonpb "go.viam.com/api/common/v1"
@@ -60,6 +65,21 @@ type Config struct {
 	// default (vel=20.0) — not otherwise documented as a controller-side
 	// default, so this module picks the same value the vendor SDK does.
 	JointSpeedPercent int `json:"joint_speed_percent,omitempty"`
+
+	// UseURDF selects the on-disk URDF (arm/fr5wm.urdf) as the kinematics
+	// source instead of the default embedded JSON (kinematics.go). The URDF
+	// path requires VIAM_MODULE_ROOT to be set (true for a normally-deployed
+	// module; not automatically true for e.g. bare `go test`). See PLAN.md
+	// Step 10 for why JSON is the default: among other things, it's the only
+	// one the Viam app's joint-limit sliders currently parse correctly.
+	UseURDF bool `json:"use_urdf,omitempty"`
+
+	// MeshDecimationRatios is only used when UseURDF is true; forwarded
+	// as-is to referenceframe.ParseModelXMLFile. nil means no decimation.
+	// See that function's doc comment for the per-collision-mesh ordering
+	// it expects (document order: base_link, then the 6 links in URDF
+	// joint order — not one entry per joint).
+	MeshDecimationRatios []float64 `json:"mesh_decimation_ratios,omitempty"`
 }
 
 // Validate ensures all parts of the config are valid. Host is optional (it
@@ -91,6 +111,14 @@ type viamFairinoFairino struct {
 	logger logging.Logger
 	cfg    *Config
 
+	// model is the FR5-WML's kinematic model, built once at construction
+	// time by kinematics.go's makeModelFrame.
+	model referenceframe.Model
+
+	// meshMu guards meshCache — see Get3DModels.
+	meshMu    sync.Mutex
+	meshCache map[string]*commonpb.Mesh
+
 	status *statusClient
 	cmd    *commandClient
 	opMgr  *operation.SingleOperationManager
@@ -116,10 +144,17 @@ func NewFairino(ctx context.Context, deps resource.Dependencies, name resource.N
 		host = defaultHost
 	}
 
+	model, err := makeModelFrame(name.Name, conf.UseURDF, conf.MeshDecimationRatios)
+	if err != nil {
+		cancelFunc()
+		return nil, err
+	}
+
 	s := &viamFairinoFairino{
 		name:       name,
 		logger:     logger,
 		cfg:        conf,
+		model:      model,
 		status:     newStatusClient(host, statusPort, logger),
 		cmd:        newCommandClient(host, commandPort, logger),
 		opMgr:      operation.NewSingleOperationManager(),
@@ -462,20 +497,23 @@ func (s *viamFairinoFairino) Close(context.Context) error {
 // that needs the command port is still stubbed.
 var errPhase2 = errors.New("not implemented yet; motion via the command port is planned but not yet built for this method")
 
-// errPhase3 marks methods that need a full FR5-WML link/geometry model
-// (URDF or equivalent). Kinematics is NOT in this list — it now returns a
-// joint-limits-only model (kinematics.go) — but EndPosition/Geometries/
-// Get3DModels need real link geometry, which that model deliberately
-// doesn't have.
-var errPhase3 = errors.New("not implemented yet; needs a full link/geometry model, not just joint limits")
-
-// EndPosition returns the current position of the arm. Deliberately stubbed
-// rather than serving the device-reported TCP (tl_cur_pos): its Euler
-// convention is unverified, and a real kinematic model would implement this
-// via forward kinematics instead. kinematics.go's model can't help here —
-// it carries joint limits only, no link geometry to compute a pose from.
+// EndPosition returns the current position of the arm, computed via the
+// kinematic model's forward kinematics (kinematics.go) from the current
+// joint positions — matches dobot's own EndPosition exactly (arm/cr10a.go:
+// model.Transform(inputs)).
+//
+// TEMPORARY: this unblocks the app's 3D scene viewer, which turned out to
+// require EndPosition to succeed before it renders anything at all — it's
+// not the final design. The real decision (serve the device-reported TCP
+// pose, tl_cur_pos, vs. compute via FK — and tl_cur_pos's Euler convention,
+// which was never confirmed against spatialmath's) is still open. See
+// PLAN.md Step 9.
 func (s *viamFairinoFairino) EndPosition(ctx context.Context, extra map[string]interface{}) (spatialmath.Pose, error) {
-	return nil, errPhase3
+	inputs, err := s.CurrentInputs(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return s.model.Transform(inputs)
 }
 
 // MoveToPosition moves the arm to the given absolute position.
@@ -496,20 +534,143 @@ func (s *viamFairinoFairino) Stop(ctx context.Context, extra map[string]interfac
 	return errPhase2
 }
 
-// Kinematics returns the joint-limits-only model built in kinematics.go.
-// It exists specifically so arm.CheckDesiredJointPositions (used by
-// MoveToJointPositions) has real per-joint limits to validate against — it
-// is NOT a real kinematic chain and Transform()/Geometries() on it should
-// not be trusted for anything beyond DoF()/limits.
+// Kinematics returns the FR5-WML's kinematic model, built once at
+// construction time (kinematics.go's makeModelFrame) by parsing the URDF
+// shipped in the module tarball (arm/fr5wm.urdf).
 func (s *viamFairinoFairino) Kinematics(ctx context.Context) (referenceframe.Model, error) {
-	return nil, errPhase2
+	return s.model, nil
 }
 
+// Geometries returns the arm's current collision geometry: the kinematic
+// model's link geometries (parsed from the URDF's <collision> meshes,
+// kinematics.go) posed at the arm's current joint positions.
+//
+// Meshes go through rebuildMeshForPLYBug (see its doc comment) to work
+// around an RDK bug where a mesh loaded from STL serializes as garbage
+// binary bytes mislabeled ContentType "ply" — this broke the app's 3D scene
+// viewer's getGeometries call outright (goply panic: "Invalid ply file"),
+// confirmed via TestGeometryProtoRoundTrip. Non-mesh geometries (box,
+// sphere, capsule) aren't affected and pass through unchanged.
 func (s *viamFairinoFairino) Geometries(ctx context.Context, extra map[string]interface{}) ([]spatialmath.Geometry, error) {
-	return nil, errPhase3
+	inputs, err := s.CurrentInputs(ctx)
+	if err != nil {
+		return nil, err
+	}
+	gif, err := s.model.Geometries(inputs)
+	if err != nil {
+		return nil, err
+	}
+	geoms := gif.Geometries()
+	for i, g := range geoms {
+		geoms[i] = rebuildMeshForPLYBug(g)
+	}
+	return geoms, nil
 }
 
-// Get3DModels returns the 3D models of the arm.
+// rebuildMeshForPLYBug works around an RDK bug in spatialmath.Mesh: a mesh
+// loaded from a non-PLY source (our case: STL, via
+// referenceframe.ParseModelXMLFile's <collision> mesh loading) has its
+// rawBytes field populated with the *original* file's bytes (raw binary
+// STL, in our case). Mesh.ensurePLYBytes only regenerates real PLY when
+// rawBytes is nil, so it returns those raw STL bytes unchanged — and
+// Mesh.ToProtobuf unconditionally labels whatever ensurePLYBytes returns as
+// ContentType "ply" regardless. The result: GetGeometries sends raw binary
+// STL data mislabeled as PLY, which goply (RDK's PLY reader) can't parse,
+// panicking with "Invalid ply file" the moment it reads the STL header
+// instead of the literal string "ply" — reproduced directly in
+// TestGeometryProtoRoundTrip. This affects any module serving Geometries()
+// for STL-sourced meshes, not just ours; worth reporting upstream.
+//
+// The fix: spatialmath.NewMesh(pose, triangles, label) — unlike the
+// STL/PLY-file constructors — never sets rawBytes, so a mesh built this way
+// correctly regenerates PLY on demand. Rebuilding from the same pose/
+// triangles/label is otherwise a no-op geometrically.
+func rebuildMeshForPLYBug(g spatialmath.Geometry) spatialmath.Geometry {
+	mesh, ok := g.(*spatialmath.Mesh)
+	if !ok {
+		return g
+	}
+	return spatialmath.NewMesh(mesh.Pose(), mesh.Triangles(), mesh.Label())
+}
+
+// meshVisualDir is arm/meshes/fr5wm/visual's location relative to the
+// module's root (VIAM_MODULE_ROOT) — the same .glb files the URDF's own
+// <visual> tags reference (see PLAN.md Step 4), not a separate copy.
+const meshVisualDir = "arm/meshes/fr5wm/visual"
+
+// Get3DModels returns the bundled per-link visualization meshes as binary
+// glTF (GLB, model/gltf-binary — the app's 3D scene viewer renders glTF,
+// not PLY), keyed by link/frame name (the .glb filename minus extension,
+// e.g. "wrist3_Link.glb" -> "wrist3_Link", which matches the URDF's own
+// link names exactly since that's how they were generated — see PLAN.md
+// Steps 2/4).
+//
+// If VIAM_MODULE_ROOT is unset, logs a warning and returns an empty map
+// with a nil error rather than failing — 3D visualization is simply
+// unavailable in that environment (unit tests, developer workstations
+// without a real module install). A per-file read failure returns a
+// wrapped error.
+//
+// Results are cached on the struct after the first successful build; the
+// returned map is a shallow copy so callers can't mutate the cache.
 func (s *viamFairinoFairino) Get3DModels(ctx context.Context, extra map[string]interface{}) (map[string]*commonpb.Mesh, error) {
-	return nil, errPhase3
+	root := os.Getenv("VIAM_MODULE_ROOT")
+	if root == "" {
+		s.logger.Warn("Get3DModels: VIAM_MODULE_ROOT is not set; returning empty mesh map")
+		return map[string]*commonpb.Mesh{}, nil
+	}
+
+	s.meshMu.Lock()
+	defer s.meshMu.Unlock()
+
+	if s.meshCache != nil {
+		return cloneMeshMap(s.meshCache), nil
+	}
+
+	built, err := buildMeshMap(root)
+	if err != nil {
+		return nil, err
+	}
+	s.meshCache = built
+	return cloneMeshMap(built), nil
+}
+
+// buildMeshMap reads every .glb under moduleRoot/meshVisualDir and keys the
+// raw bytes by filename minus extension.
+func buildMeshMap(moduleRoot string) (map[string]*commonpb.Mesh, error) {
+	dir := filepath.Join(moduleRoot, meshVisualDir)
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil, fmt.Errorf("reading mesh dir %q: %w", dir, err)
+	}
+
+	out := make(map[string]*commonpb.Mesh, len(entries))
+	for _, entry := range entries {
+		if entry.IsDir() || filepath.Ext(entry.Name()) != ".glb" {
+			continue
+		}
+		path := filepath.Join(dir, entry.Name())
+		//nolint:gosec // path is built from the module root and a directory listing, no user input.
+		glb, err := os.ReadFile(path)
+		if err != nil {
+			return nil, fmt.Errorf("loading mesh %q: %w", path, err)
+		}
+		name := strings.TrimSuffix(entry.Name(), ".glb")
+		out[name] = &commonpb.Mesh{
+			ContentType: "model/gltf-binary",
+			Mesh:        glb,
+		}
+	}
+	return out, nil
+}
+
+// cloneMeshMap returns a shallow copy of m (a fresh map sharing the same
+// *commonpb.Mesh values), so a caller mutating the returned map can't
+// corrupt the cached one.
+func cloneMeshMap(m map[string]*commonpb.Mesh) map[string]*commonpb.Mesh {
+	out := make(map[string]*commonpb.Mesh, len(m))
+	for k, v := range m {
+		out[k] = v
+	}
+	return out
 }

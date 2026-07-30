@@ -1,0 +1,12 @@
+pybullet
+pillow
+numpy
+
+# for tools/convert_dae_to_glb.py
+trimesh
+pycollada
+lxml
+networkx
+
+# for tools/compare_dae_glb_meshes.py (no GL/offscreen-renderer dependency)
+matplotlib
