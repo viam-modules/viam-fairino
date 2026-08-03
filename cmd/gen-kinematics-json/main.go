@@ -1,7 +1,7 @@
 // Command gen-kinematics-json is a one-off generator, run manually and its
 // output committed — not run at build or module-start time. It parses the
-// validated arm/fr5wm.urdf and dumps the resulting SVA-style kinematics
-// config to arm/fr5wm_kinematics.json, which kinematics.go go:embeds as the
+// validated arm/fr5wml.urdf and dumps the resulting SVA-style kinematics
+// config to arm/fr5wml_kinematics.json, which kinematics.go go:embeds as the
 // default (non-URDF) kinematics source (PLAN.md Step 10).
 //
 // Run from the repo root: go run ./cmd/gen-kinematics-json
@@ -16,13 +16,13 @@ import (
 )
 
 const (
-	urdfPath = "arm/fr5wm.urdf"
-	jsonPath = "arm/fr5wm_kinematics.json"
+	urdfPath = "arm/fr5wml.urdf"
+	jsonPath = "arm/fr5wml_kinematics.json"
 
 	// numCollisionMeshes is the count of <collision><mesh> elements in
-	// arm/fr5wm.urdf, in document order (base_link, then the 6 links) —
-	// meshDecimationRatios below needs exactly one entry per mesh, not per
-	// joint (flange has no collision geometry, so it's 7, not 8 or 6). See
+	// arm/fr5wml.urdf, in document order (base_link, then the 6 links) — one
+	// per link, no flange/tool frame in this URDF. meshDecimationRatios
+	// below needs exactly one entry per mesh, not per joint. See
 	// referenceframe.ParseModelXMLFile's doc comment for this ordering.
 	numCollisionMeshes = 7
 

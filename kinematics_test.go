@@ -10,7 +10,7 @@ import (
 
 // buildBothModels returns (jsonModel, urdfModel) — the default embedded-JSON
 // source and the on-disk URDF source, both derived from the same
-// arm/fr5wm.urdf (see PLAN.md Step 10).
+// arm/fr5wml.urdf (see PLAN.md Step 10).
 func buildBothModels(t *testing.T) (referenceframe.Model, referenceframe.Model) {
 	t.Helper()
 	t.Setenv("VIAM_MODULE_ROOT", ".")
@@ -37,9 +37,9 @@ func degToInputs(deg []float64) []referenceframe.Input {
 	return inputs
 }
 
-// TestJSONURDFJointLimitsAgree guards that arm/fr5wm_kinematics.json (the
+// TestJSONURDFJointLimitsAgree guards that arm/fr5wml_kinematics.json (the
 // default kinematics source) reports the same per-joint limits as
-// arm/fr5wm.urdf (source of truth) — the JSON is generated FROM the URDF
+// arm/fr5wml.urdf (source of truth) — the JSON is generated FROM the URDF
 // (cmd/gen-kinematics-json), but nothing stops it from silently drifting if
 // the URDF is edited without regenerating.
 func TestJSONURDFJointLimitsAgree(t *testing.T) {

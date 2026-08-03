@@ -6,8 +6,8 @@
 // sends motion commands on the controller's 8080 command port; so far only
 // MoveToJointPositions uses it. Kinematics returns a real link/geometry
 // model (kinematics.go), parsed from the URDF shipped in the module tarball
-// (arm/fr5wm.urdf — see PLAN.md Steps 0-5 for how that URDF was derived and
-// validated); Geometries and Get3DModels both use that same model and its
+// (arm/fr5wml.urdf — see PLAN.md STATUS for where this URDF actually came
+// from); Geometries and Get3DModels both use that same model and its
 // bundled meshes. EndPosition is still stubbed (design pending, see its own
 // doc comment), as is everything that needs the command port for motion
 // beyond MoveToJointPositions (Cartesian/multi-waypoint motion, Stop).
@@ -66,7 +66,7 @@ type Config struct {
 	// default, so this module picks the same value the vendor SDK does.
 	JointSpeedPercent int `json:"joint_speed_percent,omitempty"`
 
-	// UseURDF selects the on-disk URDF (arm/fr5wm.urdf) as the kinematics
+	// UseURDF selects the on-disk URDF (arm/fr5wml.urdf) as the kinematics
 	// source instead of the default embedded JSON (kinematics.go). The URDF
 	// path requires VIAM_MODULE_ROOT to be set (true for a normally-deployed
 	// module; not automatically true for e.g. bare `go test`). See PLAN.md
@@ -536,7 +536,7 @@ func (s *viamFairinoFairino) Stop(ctx context.Context, extra map[string]interfac
 
 // Kinematics returns the FR5-WML's kinematic model, built once at
 // construction time (kinematics.go's makeModelFrame) by parsing the URDF
-// shipped in the module tarball (arm/fr5wm.urdf).
+// shipped in the module tarball (arm/fr5wml.urdf).
 func (s *viamFairinoFairino) Kinematics(ctx context.Context) (referenceframe.Model, error) {
 	return s.model, nil
 }
@@ -593,10 +593,10 @@ func rebuildMeshForPLYBug(g spatialmath.Geometry) spatialmath.Geometry {
 	return spatialmath.NewMesh(mesh.Pose(), mesh.Triangles(), mesh.Label())
 }
 
-// meshVisualDir is arm/meshes/fr5wm/visual's location relative to the
+// meshVisualDir is arm/meshes/fr5wml/visual's location relative to the
 // module's root (VIAM_MODULE_ROOT) — the same .glb files the URDF's own
 // <visual> tags reference (see PLAN.md Step 4), not a separate copy.
-const meshVisualDir = "arm/meshes/fr5wm/visual"
+const meshVisualDir = "arm/meshes/fr5wml/visual"
 
 // Get3DModels returns the bundled per-link visualization meshes as binary
 // glTF (GLB, model/gltf-binary — the app's 3D scene viewer renders glTF,

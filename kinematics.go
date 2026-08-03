@@ -9,32 +9,34 @@ import (
 	"go.viam.com/rdk/referenceframe"
 )
 
-// urdfRelPath is arm/fr5wm.urdf's location relative to the module's root
+// urdfRelPath is arm/fr5wml.urdf's location relative to the module's root
 // directory (VIAM_MODULE_ROOT, set by viam-server after unpacking the
-// module tarball). See PLAN.md Steps 0-4 for how that URDF was derived from
-// Fairino's own ROS description (fairino_description/urdf/FR5WM.urdf),
-// cleaned up, and laid out under arm/ alongside its meshes.
-const urdfRelPath = "arm/fr5wm.urdf"
+// module tarball). See PLAN.md STATUS/Step 1 for where this URDF actually
+// came from: a manually CAD-corrected copy of Fairino's fairino5_v6.urdf
+// (link lengths fixed; mass/inertia and meshes are still fairino5_v6's
+// originals and known to be inaccurate for now) — not FR5WM.urdf, which an
+// earlier pass discovered didn't match the physical FR5-WML at all.
+const urdfRelPath = "arm/fr5wml.urdf"
 
-// fr5wmKinematicsJSON is the embedded default kinematics source — generated
-// once from the validated arm/fr5wm.urdf by cmd/gen-kinematics-json (PLAN.md
+// fr5wmlKinematicsJSON is the embedded default kinematics source — generated
+// once from the validated arm/fr5wml.urdf by cmd/gen-kinematics-json (PLAN.md
 // Step 10) and committed, not regenerated at build/run time. Used unless
 // Config.UseURDF selects the on-disk URDF path instead.
 //
-//go:embed arm/fr5wm_kinematics.json
-var fr5wmKinematicsJSON []byte
+//go:embed arm/fr5wml_kinematics.json
+var fr5wmlKinematicsJSON []byte
 
 // makeModelFrame builds the FR5-WML's kinematic model. useURDF selects the
 // source: false (the default) parses the embedded JSON
-// (fr5wmKinematicsJSON); true parses the URDF shipped in the module tarball
+// (fr5wmlKinematicsJSON); true parses the URDF shipped in the module tarball
 // instead, in which case meshDecimationRatios is forwarded as-is to
 // ParseModelXMLFile (nil means no decimation — see that function's doc
 // comment for the per-collision-mesh ordering it expects). Both sources are
-// derived from, and validated against, the same arm/fr5wm.urdf — see
+// derived from, and validated against, the same arm/fr5wml.urdf — see
 // TestJSONURDFForwardKinematicsAgree / TestJSONURDFJointLimitsAgree.
 func makeModelFrame(name string, useURDF bool, meshDecimationRatios []float64) (referenceframe.Model, error) {
 	if !useURDF {
-		model, err := referenceframe.UnmarshalModelJSON(fr5wmKinematicsJSON, name)
+		model, err := referenceframe.UnmarshalModelJSON(fr5wmlKinematicsJSON, name)
 		if err != nil {
 			return nil, fmt.Errorf("failed to parse embedded kinematics JSON: %w", err)
 		}

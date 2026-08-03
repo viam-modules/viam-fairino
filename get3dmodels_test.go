@@ -7,16 +7,17 @@ import (
 	"go.viam.com/rdk/logging"
 )
 
-// wantLinkNames are the 7 real links in arm/fr5wm.urdf (flange is
-// geometry-less and intentionally excluded — see PLAN.md Step 1).
+// wantLinkNames are the 7 links in arm/fr5wml.urdf (no flange/tool frame in
+// this URDF, unlike the earlier FR5WM.urdf-derived one — see PLAN.md
+// STATUS).
 var wantLinkNames = []string{
 	"base_link",
-	"shoulder_Link",
-	"upperarm_Link",
-	"forearm_Link",
-	"wrist1_Link",
-	"wrist2_Link",
-	"wrist3_Link",
+	"shoulder_link",
+	"upperarm_link",
+	"forearm_link",
+	"wrist1_link",
+	"wrist2_link",
+	"wrist3_link",
 }
 
 func TestGet3DModelsUnsetModuleRoot(t *testing.T) {
