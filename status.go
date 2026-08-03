@@ -165,7 +165,7 @@ func (c *statusClient) readLoop(ctx context.Context, conn net.Conn) {
 				continue
 			}
 			if expected := lastCount + 1; haveLast && fr.FrameCount != expected {
-				c.logger.Warnw("status frame count jumped — frames dropped",
+				c.logger.Debugf("status frame count jumped — frames dropped",
 					"expected", expected, "got", fr.FrameCount,
 					"missed", uint8(fr.FrameCount-expected))
 			}
