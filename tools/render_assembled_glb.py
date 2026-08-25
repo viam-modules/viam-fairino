@@ -38,6 +38,12 @@ LINK_COLORS = {
     "wrist1_Link": "tab:red",
     "wrist2_Link": "tab:purple",
     "wrist3_Link": "tab:brown",
+    "shoulder_link": "tab:blue",
+    "upperarm_link": "tab:orange",
+    "forearm_link": "tab:green",
+    "wrist1_link": "tab:red",
+    "wrist2_link": "tab:purple",
+    "wrist3_link": "tab:brown",
 }
 
 
@@ -110,7 +116,13 @@ def parse_chain(urdf_path: str):
     return links, joints
 
 
+METERS_TO_MM = 1000.0
+
+
 def forward_kinematics(joints, root_link: str, joint_angles: dict) -> dict:
+    """URDF <origin xyz> is in meters, but every mesh in this project is in
+    millimeters -- scale joint translations up so they combine correctly
+    with mesh-space vertex coordinates in render_pose()."""
     world = {root_link: np.eye(4)}
     remaining = list(joints)
     while remaining:
@@ -118,7 +130,7 @@ def forward_kinematics(joints, root_link: str, joint_angles: dict) -> dict:
         for j in list(remaining):
             if j["parent"] not in world:
                 continue
-            origin = homogeneous(rpy_to_matrix(*j["rpy"]), np.array(j["xyz"]))
+            origin = homogeneous(rpy_to_matrix(*j["rpy"]), np.array(j["xyz"]) * METERS_TO_MM)
             if j["type"] == "revolute":
                 angle = joint_angles.get(j["name"], 0.0)
                 rot = homogeneous(axis_angle_matrix(j["axis"], angle), np.zeros(3))
