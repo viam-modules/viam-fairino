@@ -39,10 +39,6 @@ type GripperConfig struct {
 	// Host is the controller IP; defaults to 192.168.58.2 (factory default).
 	Host string `json:"host,omitempty"`
 
-	// Index is the gripper index on the controller (manual: usually 1).
-	// Defaults to 1.
-	Index int `json:"index,omitempty"`
-
 	// Company/Device/SoftwareVersion/Bus identify the physical gripper for
 	// SetGripperConfig. They only take effect when Configure is true. The
 	// numeric codes come from the controller's WebApp gripper dropdown; read
@@ -89,11 +85,14 @@ func (cfg *GripperConfig) Validate(path string) ([]string, []string, error) {
 			return nil, nil, fmt.Errorf("%s: %s must be between 0 and 100, got %d", path, name, *p)
 		}
 	}
-	if cfg.Index < 0 {
-		return nil, nil, fmt.Errorf("%s: index must be >= 0, got %d", path, cfg.Index)
-	}
 	return nil, nil, nil
 }
+
+// gripperIndex is the controller's gripper selector, passed to every gripper
+// call. The controller can address multiple grippers, but a machine has one, so
+// this is fixed at 1 (matching every vendor SDK example) rather than exposed as
+// config.
+const gripperIndex = 1
 
 type fairinoGripper struct {
 	resource.AlwaysRebuild
@@ -103,7 +102,6 @@ type fairinoGripper struct {
 	client *xmlrpcClient
 	opMgr  *operation.SingleOperationManager
 
-	index   int
 	speed   int
 	force   int
 	maxTime int
@@ -126,7 +124,6 @@ func newFairinoGripper(ctx context.Context, deps resource.Dependencies, rawConf 
 		logger:  logger,
 		client:  newXMLRPCClient(host, xmlrpcPort),
 		opMgr:   operation.NewSingleOperationManager(),
-		index:   valueOr(conf.Index, 1),
 		speed:   valueOr(conf.SpeedPercent, 50),
 		force:   valueOr(conf.ForcePercent, 50),
 		maxTime: valueOr(conf.MaxTimeMs, 30000),
@@ -143,12 +140,12 @@ func newFairinoGripper(ctx context.Context, deps resource.Dependencies, rawConf 
 	}
 
 	if conf.Activate == nil || *conf.Activate {
-		if _, err := g.client.callChecked(ctx, "ActGripper", g.index, 1); err != nil {
+		if _, err := g.client.callChecked(ctx, "ActGripper", gripperIndex, 1); err != nil {
 			// Don't fail construction — surface it so the resource comes up and
 			// the user can inspect/config via DoCommand. Activation typically
 			// fails only when no gripper is configured on the controller.
 			logger.CWarnw(ctx, "gripper activation (ActGripper) failed; is a gripper configured on the controller?",
-				"index", g.index, "err", err)
+				"index", gripperIndex, "err", err)
 		}
 	}
 
@@ -159,7 +156,7 @@ func newFairinoGripper(ctx context.Context, deps resource.Dependencies, rawConf 
 // are the parallel two-finger (non-rotary) values; rotNum is a double.
 func (g *fairinoGripper) moveGripper(ctx context.Context, pos int) error {
 	_, err := g.client.callChecked(ctx, "MoveGripper",
-		g.index, pos, g.speed, g.force, g.maxTime, 1 /*block*/, 0 /*type*/, 0.0 /*rotNum*/, 0 /*rotVel*/, 0 /*rotTorque*/)
+		gripperIndex, pos, g.speed, g.force, g.maxTime, 1 /*block*/, 0 /*type*/, 0.0 /*rotNum*/, 0 /*rotVel*/, 0 /*rotTorque*/)
 	return err
 }
 
@@ -313,7 +310,7 @@ func (g *fairinoGripper) DoCommand(ctx context.Context, cmd map[string]any) (map
 		if command == "deactivate" {
 			act = 0
 		}
-		if _, err := g.client.callChecked(ctx, "ActGripper", g.index, act); err != nil {
+		if _, err := g.client.callChecked(ctx, "ActGripper", gripperIndex, act); err != nil {
 			return nil, err
 		}
 		return map[string]any{"ok": true}, nil
