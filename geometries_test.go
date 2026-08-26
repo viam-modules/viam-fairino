@@ -27,7 +27,7 @@ import (
 // s.Geometries()'s actual output (post-workaround) round-trips cleanly.
 func TestGeometryProtoRoundTrip(t *testing.T) {
 	t.Setenv("VIAM_MODULE_ROOT", ".")
-	model, err := makeModelFrame("fairino", true, nil)
+	model, err := makeModelFrame("fairino", ModelFR5WML, true, nil)
 	if err != nil {
 		t.Fatalf("makeModelFrame: %v", err)
 	}

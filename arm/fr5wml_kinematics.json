@@ -39,6 +39,74 @@
       "parent": "j1"
     },
     {
+      "id": "frame1",
+      "translation": {
+        "X": 0,
+        "Y": 0,
+        "Z": 0
+      },
+      "orientation": {
+        "type": "euler_angles",
+        "value": {
+          "pitch": 0,
+          "roll": 0,
+          "yaw": 0
+        }
+      },
+      "parent": "j1_dh"
+    },
+    {
+      "id": "j1_dh",
+      "translation": {
+        "X": 180,
+        "Y": 0,
+        "Z": 0
+      },
+      "orientation": {
+        "type": "euler_angles",
+        "value": {
+          "pitch": 0,
+          "roll": 1.570796327,
+          "yaw": 0
+        }
+      },
+      "parent": "link1"
+    },
+    {
+      "id": "j2_dh",
+      "translation": {
+        "X": 0,
+        "Y": 0,
+        "Z": -970
+      },
+      "orientation": {
+        "type": "euler_angles",
+        "value": {
+          "pitch": 0,
+          "roll": 0,
+          "yaw": 0
+        }
+      },
+      "parent": "link2"
+    },
+    {
+      "id": "j3_dh",
+      "translation": {
+        "X": 0,
+        "Y": 0,
+        "Z": -816
+      },
+      "orientation": {
+        "type": "euler_angles",
+        "value": {
+          "pitch": 0,
+          "roll": 0,
+          "yaw": 0
+        }
+      },
+      "parent": "link3"
+    },
+    {
       "id": "j4_dh",
       "translation": {
         "X": 159,
@@ -54,23 +122,6 @@
         }
       },
       "parent": "link4"
-    },
-    {
-      "id": "j6_dh",
-      "translation": {
-        "X": 160,
-        "Y": 0,
-        "Z": 0
-      },
-      "orientation": {
-        "type": "euler_angles",
-        "value": {
-          "pitch": 0,
-          "roll": 0,
-          "yaw": 0
-        }
-      },
-      "parent": "link6"
     },
     {
       "id": "link2",
@@ -109,6 +160,23 @@
       "parent": "j2"
     },
     {
+      "id": "frame2",
+      "translation": {
+        "X": 0,
+        "Y": 0,
+        "Z": 0
+      },
+      "orientation": {
+        "type": "euler_angles",
+        "value": {
+          "pitch": 0,
+          "roll": 0,
+          "yaw": 0
+        }
+      },
+      "parent": "j2_dh"
+    },
+    {
       "id": "frame3",
       "translation": {
         "X": 0,
@@ -124,42 +192,6 @@
         }
       },
       "parent": "j3_dh"
-    },
-    {
-      "id": "link4",
-      "translation": {
-        "X": 0,
-        "Y": 0,
-        "Z": 0
-      },
-      "orientation": null,
-      "geometry": {
-        "type": "mesh",
-        "x": 0,
-        "y": 0,
-        "z": 0,
-        "r": 0,
-        "l": 0,
-        "mesh_data": "cGx5CmZvcm1hdCBhc2NpaSAxLjAKZWxlbWVudCB2ZXJ0ZXggMTMKcHJvcGVydHkgZmxvYXQgeApwcm9wZXJ0eSBmbG9hdCB5CnByb3BlcnR5IGZsb2F0IHoKZWxlbWVudCBmYWNlIDIyCnByb3BlcnR5IGxpc3QgdWNoYXIgaW50IHZlcnRleF9pbmRpY2VzCmVuZF9oZWFkZXIKMC4yOTAwODkgMC4wMDE0NjEgMC4wMDEzMjQKMC4xOTIxOTggLTAuMDUwMDAzIDAuMDg0NTk1CjAuMjIyNDQ4IC0wLjA3NzczNCAtMC4wNDc2MjIKMC4yMjI0NDggMC4wODA2NTcgMC4wNTAyNjkKLTAuMDI1ODM5IDAuMDAxNDYxIC0wLjA5NjU2NwotMC4wMjU4MzkgLTAuMDk2NDMwIDAuMDAxMzI0Ci0wLjAyNTgzOSAwLjAwMTQ2MSAwLjA5OTIxNQotMC4xMjM3MzAgMC4wMDE0NjEgMC4wMDEzMjQKLTAuMDI1ODM5IDAuMDk5MzUyIDAuMDAxMzI0CjAuMjIyNDQ4IDAuMDgwNjU3IC0wLjA0NzYyMgotMC4xMDUwMzQgLTAuMDQ3NDg0IC0wLjAyODkyNgotMC4xMDUwMzQgLTAuMDQ3NDg0IDAuMDMxNTc0CjAuMTkyMTk4IDAuMDAxNDYxIC0wLjA5NjU2NwozIDAgMSAyCjMgMSAwIDMKMyA0IDIgNQozIDIgMSA1CjMgNSAxIDYKMyAxIDMgNgozIDcgNiA4CjMgNCA3IDgKMyA2IDMgOAozIDQgOCA5CjMgOCAzIDkKMyAzIDAgOQozIDcgNCAxMAozIDQgNSAxMAozIDcgMTAgMTEKMyAxMCA1IDExCjMgNSA2IDExCjMgNiA3IDExCjMgNCA5IDEyCjMgMiA0IDEyCjMgOSAwIDEyCjMgMCAyIDEyCg==",
-        "mesh_content_type": "ply",
-        "mesh_file_path": "meshes/fr5wml/collision/link4.stl",
-        "translation": {
-          "X": 0,
-          "Y": 0,
-          "Z": 0
-        },
-        "orientation": {
-          "type": "quaternion",
-          "value": {
-            "W": 1,
-            "X": 0,
-            "Y": 0,
-            "Z": 0
-          }
-        },
-        "Label": ""
-      },
-      "parent": "j4"
     },
     {
       "id": "frame4",
@@ -179,65 +211,57 @@
       "parent": "j4_dh"
     },
     {
-      "id": "tool0",
+      "id": "frame5",
+      "translation": {
+        "X": 0,
+        "Y": 0,
+        "Z": 0
+      },
+      "orientation": {
+        "type": "euler_angles",
+        "value": {
+          "pitch": 0,
+          "roll": 0,
+          "yaw": 0
+        }
+      },
+      "parent": "j5_dh"
+    },
+    {
+      "id": "link6",
       "translation": {
         "X": 0,
         "Y": 0,
         "Z": 0
       },
       "orientation": null,
-      "parent": "j6_dh"
-    },
-    {
-      "id": "j2_dh",
-      "translation": {
-        "X": 0,
-        "Y": 0,
-        "Z": -970
+      "geometry": {
+        "type": "mesh",
+        "x": 0,
+        "y": 0,
+        "z": 0,
+        "r": 0,
+        "l": 0,
+        "mesh_data": "cGx5CmZvcm1hdCBhc2NpaSAxLjAKZWxlbWVudCB2ZXJ0ZXggMTMKcHJvcGVydHkgZmxvYXQgeApwcm9wZXJ0eSBmbG9hdCB5CnByb3BlcnR5IGZsb2F0IHoKZWxlbWVudCBmYWNlIDIyCnByb3BlcnR5IGxpc3QgdWNoYXIgaW50IHZlcnRleF9pbmRpY2VzCmVuZF9oZWFkZXIKLTAuMTAzMTE2IC0wLjAwMDc0MiAwLjAwMjM4NwotMC4wMjMyNDcgLTAuMDgwNjEyIDAuMDAyMzg3Ci0wLjAyMzI0NyAtMC4wMDA3NDIgMC4wODIyNTYKLTAuMDIzMjQ3IDAuMDc5MTI3IDAuMDAyMzg3Ci0wLjA2MzE4MSAtMC4wMjU0MjMgLTAuMDYyMjI5Ci0wLjAyMzI0NyAtMC4wMDA3NDIgLTAuMDc3NDgyCjAuMjEyNDE2IC0wLjA2NTM1OCAtMC4wMzc1NDgKLTAuMDQ3OTI4IDAuMDYzODczIC0wLjAzNzU0OAowLjE4NzczNSAwLjA0MTI0NyAwLjA3MDMyOAowLjE4NzczNSAtMC4wMDA3NDIgLTAuMDc3NDgyCjAuMjY3NjA1IC0wLjAwMDc0MiAwLjAwMjM4NwowLjE4NzczNSAtMC4wNDI3MzIgMC4wNzAzMjgKMC4yMTI0MTYgMC4wNjM4NzMgLTAuMDM3NTQ4CjMgMCAxIDIKMyAwIDIgMwozIDEgMCA0CjMgNSA2IDQKMyA2IDEgNAozIDAgMyA3CjMgNCAwIDcKMyA1IDQgNwozIDMgMiA4CjMgNSA3IDkKMyA2IDUgOQozIDEwIDYgOQozIDEgNiAxMQozIDIgMSAxMQozIDggMiAxMQozIDYgMTAgMTEKMyAxMCA4IDExCjMgNyAzIDEyCjMgMyA4IDEyCjMgOSA3IDEyCjMgOCAxMCAxMgozIDEwIDkgMTIK",
+        "mesh_content_type": "ply",
+        "mesh_file_path": "meshes/fr5wml/collision/link6.stl",
+        "translation": {
+          "X": 0,
+          "Y": 0,
+          "Z": 0
+        },
+        "orientation": {
+          "type": "quaternion",
+          "value": {
+            "W": 1,
+            "X": 0,
+            "Y": 0,
+            "Z": 0
+          }
+        },
+        "Label": ""
       },
-      "orientation": {
-        "type": "euler_angles",
-        "value": {
-          "pitch": 0,
-          "roll": 0,
-          "yaw": 0
-        }
-      },
-      "parent": "link2"
-    },
-    {
-      "id": "j3_dh",
-      "translation": {
-        "X": 0,
-        "Y": 0,
-        "Z": -816
-      },
-      "orientation": {
-        "type": "euler_angles",
-        "value": {
-          "pitch": 0,
-          "roll": 0,
-          "yaw": 0
-        }
-      },
-      "parent": "link3"
-    },
-    {
-      "id": "j5_dh",
-      "translation": {
-        "X": 114,
-        "Y": 0,
-        "Z": 0
-      },
-      "orientation": {
-        "type": "euler_angles",
-        "value": {
-          "pitch": 0,
-          "roll": -1.570796327,
-          "yaw": 0
-        }
-      },
-      "parent": "link5"
+      "parent": "j6"
     },
     {
       "id": "base_link",
@@ -282,7 +306,7 @@
       }
     },
     {
-      "id": "link3",
+      "id": "link4",
       "translation": {
         "X": 0,
         "Y": 0,
@@ -296,9 +320,9 @@
         "z": 0,
         "r": 0,
         "l": 0,
-        "mesh_data": "cGx5CmZvcm1hdCBhc2NpaSAxLjAKZWxlbWVudCB2ZXJ0ZXggMTMKcHJvcGVydHkgZmxvYXQgeApwcm9wZXJ0eSBmbG9hdCB5CnByb3BlcnR5IGZsb2F0IHoKZWxlbWVudCBmYWNlIDIyCnByb3BlcnR5IGxpc3QgdWNoYXIgaW50IHZlcnRleF9pbmRpY2VzCmVuZF9oZWFkZXIKMC4wMDAxMDMgLTAuMTA0OTk1IC0wLjk0MzM3MwowLjEwNDM4NSAtMC4wMDA3MTIgLTAuOTQzMzczCjAuMDU0OTI3IC0wLjA4OTQyMCAwLjE0OTMyOQotMC4xMDQxNzkgLTAuMDAwNzEyIC0wLjk0MzM3MwotMC4wNTQ3MjIgMC4wODc5OTYgMC4xNDkzMjkKLTAuMDMyMTIyIDAuMDgzNjU0IC0wLjk5NTUxNAowLjAwMDEwMyAwLjEwMzU3MCAtMC45NDMzNzMKMC4wMDAxMDMgLTAuMDAwNzEyIC0xLjA0NzY1NQotMC4wMzIxMjIgLTAuMDg1MDc4IC0wLjk5NTUxNAotMC4wODQyNjMgLTAuMDUyODUzIDAuMTgxNTU0CjAuMDAwMTAzIC0wLjAwMDcxMiAwLjI1MzYxMQowLjA4ODgxMSAtMC4wMDA3MTIgMC4yMDQxNTMKMC4wNTQ5MjcgMC4wODc5OTYgMC4xNDkzMjkKMyAwIDEgMgozIDMgNCA1CjMgNCA2IDUKMyA3IDMgNQozIDYgMSA1CjMgMSA3IDUKMyAzIDcgOAozIDcgMSA4CjMgMSAwIDgKMyAzIDggOQozIDQgMyA5CjMgOCAwIDkKMyAwIDIgOQozIDEwIDQgOQozIDIgMTAgOQozIDEwIDIgMTEKMyAyIDEgMTEKMyA0IDEwIDEyCjMgMTAgMTEgMTIKMyA2IDQgMTIKMyAxMSAxIDEyCjMgMSA2IDEyCg==",
+        "mesh_data": "cGx5CmZvcm1hdCBhc2NpaSAxLjAKZWxlbWVudCB2ZXJ0ZXggMTMKcHJvcGVydHkgZmxvYXQgeApwcm9wZXJ0eSBmbG9hdCB5CnByb3BlcnR5IGZsb2F0IHoKZWxlbWVudCBmYWNlIDIyCnByb3BlcnR5IGxpc3QgdWNoYXIgaW50IHZlcnRleF9pbmRpY2VzCmVuZF9oZWFkZXIKMC4yOTAwODkgMC4wMDE0NjEgMC4wMDEzMjQKMC4xOTIxOTggLTAuMDUwMDAzIDAuMDg0NTk1CjAuMjIyNDQ4IC0wLjA3NzczNCAtMC4wNDc2MjIKMC4yMjI0NDggMC4wODA2NTcgMC4wNTAyNjkKLTAuMDI1ODM5IDAuMDAxNDYxIC0wLjA5NjU2NwotMC4wMjU4MzkgLTAuMDk2NDMwIDAuMDAxMzI0Ci0wLjAyNTgzOSAwLjAwMTQ2MSAwLjA5OTIxNQotMC4xMjM3MzAgMC4wMDE0NjEgMC4wMDEzMjQKLTAuMDI1ODM5IDAuMDk5MzUyIDAuMDAxMzI0CjAuMjIyNDQ4IDAuMDgwNjU3IC0wLjA0NzYyMgotMC4xMDUwMzQgLTAuMDQ3NDg0IC0wLjAyODkyNgotMC4xMDUwMzQgLTAuMDQ3NDg0IDAuMDMxNTc0CjAuMTkyMTk4IDAuMDAxNDYxIC0wLjA5NjU2NwozIDAgMSAyCjMgMSAwIDMKMyA0IDIgNQozIDIgMSA1CjMgNSAxIDYKMyAxIDMgNgozIDcgNiA4CjMgNCA3IDgKMyA2IDMgOAozIDQgOCA5CjMgOCAzIDkKMyAzIDAgOQozIDcgNCAxMAozIDQgNSAxMAozIDcgMTAgMTEKMyAxMCA1IDExCjMgNSA2IDExCjMgNiA3IDExCjMgNCA5IDEyCjMgMiA0IDEyCjMgOSAwIDEyCjMgMCAyIDEyCg==",
         "mesh_content_type": "ply",
-        "mesh_file_path": "meshes/fr5wml/collision/link3.stl",
+        "mesh_file_path": "meshes/fr5wml/collision/link4.stl",
         "translation": {
           "X": 0,
           "Y": 0,
@@ -315,7 +339,7 @@
         },
         "Label": ""
       },
-      "parent": "j3"
+      "parent": "j4"
     },
     {
       "id": "link5",
@@ -354,7 +378,41 @@
       "parent": "j5"
     },
     {
-      "id": "link6",
+      "id": "j5_dh",
+      "translation": {
+        "X": 114,
+        "Y": 0,
+        "Z": 0
+      },
+      "orientation": {
+        "type": "euler_angles",
+        "value": {
+          "pitch": 0,
+          "roll": -1.570796327,
+          "yaw": 0
+        }
+      },
+      "parent": "link5"
+    },
+    {
+      "id": "j6_dh",
+      "translation": {
+        "X": 160,
+        "Y": 0,
+        "Z": 0
+      },
+      "orientation": {
+        "type": "euler_angles",
+        "value": {
+          "pitch": 0,
+          "roll": 0,
+          "yaw": 0
+        }
+      },
+      "parent": "link6"
+    },
+    {
+      "id": "link3",
       "translation": {
         "X": 0,
         "Y": 0,
@@ -368,9 +426,9 @@
         "z": 0,
         "r": 0,
         "l": 0,
-        "mesh_data": "cGx5CmZvcm1hdCBhc2NpaSAxLjAKZWxlbWVudCB2ZXJ0ZXggMTMKcHJvcGVydHkgZmxvYXQgeApwcm9wZXJ0eSBmbG9hdCB5CnByb3BlcnR5IGZsb2F0IHoKZWxlbWVudCBmYWNlIDIyCnByb3BlcnR5IGxpc3QgdWNoYXIgaW50IHZlcnRleF9pbmRpY2VzCmVuZF9oZWFkZXIKLTAuMTAzMTE2IC0wLjAwMDc0MiAwLjAwMjM4NwotMC4wMjMyNDcgLTAuMDgwNjEyIDAuMDAyMzg3Ci0wLjAyMzI0NyAtMC4wMDA3NDIgMC4wODIyNTYKLTAuMDIzMjQ3IDAuMDc5MTI3IDAuMDAyMzg3Ci0wLjA2MzE4MSAtMC4wMjU0MjMgLTAuMDYyMjI5Ci0wLjAyMzI0NyAtMC4wMDA3NDIgLTAuMDc3NDgyCjAuMjEyNDE2IC0wLjA2NTM1OCAtMC4wMzc1NDgKLTAuMDQ3OTI4IDAuMDYzODczIC0wLjAzNzU0OAowLjE4NzczNSAwLjA0MTI0NyAwLjA3MDMyOAowLjE4NzczNSAtMC4wMDA3NDIgLTAuMDc3NDgyCjAuMjY3NjA1IC0wLjAwMDc0MiAwLjAwMjM4NwowLjE4NzczNSAtMC4wNDI3MzIgMC4wNzAzMjgKMC4yMTI0MTYgMC4wNjM4NzMgLTAuMDM3NTQ4CjMgMCAxIDIKMyAwIDIgMwozIDEgMCA0CjMgNSA2IDQKMyA2IDEgNAozIDAgMyA3CjMgNCAwIDcKMyA1IDQgNwozIDMgMiA4CjMgNSA3IDkKMyA2IDUgOQozIDEwIDYgOQozIDEgNiAxMQozIDIgMSAxMQozIDggMiAxMQozIDYgMTAgMTEKMyAxMCA4IDExCjMgNyAzIDEyCjMgMyA4IDEyCjMgOSA3IDEyCjMgOCAxMCAxMgozIDEwIDkgMTIK",
+        "mesh_data": "cGx5CmZvcm1hdCBhc2NpaSAxLjAKZWxlbWVudCB2ZXJ0ZXggMTMKcHJvcGVydHkgZmxvYXQgeApwcm9wZXJ0eSBmbG9hdCB5CnByb3BlcnR5IGZsb2F0IHoKZWxlbWVudCBmYWNlIDIyCnByb3BlcnR5IGxpc3QgdWNoYXIgaW50IHZlcnRleF9pbmRpY2VzCmVuZF9oZWFkZXIKMC4wMDAxMDMgLTAuMTA0OTk1IC0wLjk0MzM3MwowLjEwNDM4NSAtMC4wMDA3MTIgLTAuOTQzMzczCjAuMDU0OTI3IC0wLjA4OTQyMCAwLjE0OTMyOQotMC4xMDQxNzkgLTAuMDAwNzEyIC0wLjk0MzM3MwotMC4wNTQ3MjIgMC4wODc5OTYgMC4xNDkzMjkKLTAuMDMyMTIyIDAuMDgzNjU0IC0wLjk5NTUxNAowLjAwMDEwMyAwLjEwMzU3MCAtMC45NDMzNzMKMC4wMDAxMDMgLTAuMDAwNzEyIC0xLjA0NzY1NQotMC4wMzIxMjIgLTAuMDg1MDc4IC0wLjk5NTUxNAotMC4wODQyNjMgLTAuMDUyODUzIDAuMTgxNTU0CjAuMDAwMTAzIC0wLjAwMDcxMiAwLjI1MzYxMQowLjA4ODgxMSAtMC4wMDA3MTIgMC4yMDQxNTMKMC4wNTQ5MjcgMC4wODc5OTYgMC4xNDkzMjkKMyAwIDEgMgozIDMgNCA1CjMgNCA2IDUKMyA3IDMgNQozIDYgMSA1CjMgMSA3IDUKMyAzIDcgOAozIDcgMSA4CjMgMSAwIDgKMyAzIDggOQozIDQgMyA5CjMgOCAwIDkKMyAwIDIgOQozIDEwIDQgOQozIDIgMTAgOQozIDEwIDIgMTEKMyAyIDEgMTEKMyA0IDEwIDEyCjMgMTAgMTEgMTIKMyA2IDQgMTIKMyAxMSAxIDEyCjMgMSA2IDEyCg==",
         "mesh_content_type": "ply",
-        "mesh_file_path": "meshes/fr5wml/collision/link6.stl",
+        "mesh_file_path": "meshes/fr5wml/collision/link3.stl",
         "translation": {
           "X": 0,
           "Y": 0,
@@ -387,75 +445,17 @@
         },
         "Label": ""
       },
-      "parent": "j6"
+      "parent": "j3"
     },
     {
-      "id": "frame1",
+      "id": "tool0",
       "translation": {
         "X": 0,
         "Y": 0,
         "Z": 0
       },
-      "orientation": {
-        "type": "euler_angles",
-        "value": {
-          "pitch": 0,
-          "roll": 0,
-          "yaw": 0
-        }
-      },
-      "parent": "j1_dh"
-    },
-    {
-      "id": "frame2",
-      "translation": {
-        "X": 0,
-        "Y": 0,
-        "Z": 0
-      },
-      "orientation": {
-        "type": "euler_angles",
-        "value": {
-          "pitch": 0,
-          "roll": 0,
-          "yaw": 0
-        }
-      },
-      "parent": "j2_dh"
-    },
-    {
-      "id": "frame5",
-      "translation": {
-        "X": 0,
-        "Y": 0,
-        "Z": 0
-      },
-      "orientation": {
-        "type": "euler_angles",
-        "value": {
-          "pitch": 0,
-          "roll": 0,
-          "yaw": 0
-        }
-      },
-      "parent": "j5_dh"
-    },
-    {
-      "id": "j1_dh",
-      "translation": {
-        "X": 180,
-        "Y": 0,
-        "Z": 0
-      },
-      "orientation": {
-        "type": "euler_angles",
-        "value": {
-          "pitch": 0,
-          "roll": 1.570796327,
-          "yaw": 0
-        }
-      },
-      "parent": "link1"
+      "orientation": null,
+      "parent": "j6_dh"
     }
   ],
   "joints": [

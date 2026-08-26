@@ -1,8 +1,8 @@
 // Command gen-kinematics-json is a one-off generator, run manually and its
-// output committed — not run at build or module-start time. It parses the
-// validated arm/fr5wml.urdf and dumps the resulting SVA-style kinematics
-// config to arm/fr5wml_kinematics.json, which kinematics.go go:embeds as the
-// default (non-URDF) kinematics source (PLAN.md Step 10).
+// output committed — not run at build or module-start time. For each supported
+// robot model it parses the validated URDF and dumps the resulting SVA-style
+// kinematics config to the embedded JSON kinematics.go go:embeds as that
+// model's default (non-URDF) kinematics source (PLAN.md Step 10).
 //
 // Run from the repo root: go run ./cmd/gen-kinematics-json
 package main
@@ -15,27 +15,31 @@ import (
 	"go.viam.com/rdk/referenceframe"
 )
 
-const (
-	urdfPath = "arm/fr5wml.urdf"
-	jsonPath = "arm/fr5wml_kinematics.json"
+// genModel describes one robot model to generate a kinematics JSON for.
+// numCollisionMeshes is the count of <collision><mesh> elements in the URDF,
+// in document order (base_link, then the 6 links) — one per link, no
+// flange/tool frame. meshDecimationRatios needs exactly one entry per mesh,
+// not per joint. See referenceframe.ParseModelXMLFile's doc comment.
+type genModel struct {
+	urdfPath           string
+	jsonPath           string
+	numCollisionMeshes int
+}
 
-	// numCollisionMeshes is the count of <collision><mesh> elements in
-	// arm/fr5wml.urdf, in document order (base_link, then the 6 links) — one
-	// per link, no flange/tool frame in this URDF. meshDecimationRatios
-	// below needs exactly one entry per mesh, not per joint. See
-	// referenceframe.ParseModelXMLFile's doc comment for this ordering.
-	numCollisionMeshes = 7
+// models must stay in sync with viamfairino's modelRegistry (kinematics.go).
+var models = []genModel{
+	{"arm/fr5wml.urdf", "arm/fr5wml_kinematics.json", 7},
+	{"arm/fr5.urdf", "arm/fr5_kinematics.json", 7},
+}
 
-	// decimationRatio is the fraction of triangles kept per mesh — applied
-	// here (unlike dobot/xarm's URDF-mode decimation) because this file gets
-	// go:embedded directly into the binary as the default kinematics
-	// source, so its size and parse cost matter in a way the on-disk,
-	// opt-in URDF path's don't. Undecimated, this file was 21.5MB (the full
-	// STL triangle data re-encoded as bloated ASCII JSON). Tune this and
-	// regenerate if the result is still too large/slow, or too coarse for
-	// collision purposes.
-	decimationRatio = 0.1
-)
+// decimationRatio is the fraction of triangles kept per mesh — applied here
+// (unlike dobot/xarm's URDF-mode decimation) because this file gets
+// go:embedded directly into the binary as the default kinematics source, so
+// its size and parse cost matter in a way the on-disk, opt-in URDF path's
+// don't. Undecimated, the FR5-WML file was 21.5MB (the full STL triangle data
+// re-encoded as bloated ASCII JSON). Tune this and regenerate if the result
+// is still too large/slow, or too coarse for collision purposes.
+const decimationRatio = 0.1
 
 func main() {
 	if err := run(); err != nil {
@@ -45,14 +49,23 @@ func main() {
 }
 
 func run() error {
-	ratios := make([]float64, numCollisionMeshes)
+	for _, m := range models {
+		if err := genOne(m); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func genOne(m genModel) error {
+	ratios := make([]float64, m.numCollisionMeshes)
 	for i := range ratios {
 		ratios[i] = decimationRatio
 	}
 
-	model, err := referenceframe.ParseModelXMLFile(urdfPath, "fairino", ratios)
+	model, err := referenceframe.ParseModelXMLFile(m.urdfPath, "fairino", ratios)
 	if err != nil {
-		return fmt.Errorf("parsing %s: %w", urdfPath, err)
+		return fmt.Errorf("parsing %s: %w", m.urdfPath, err)
 	}
 
 	cfg := model.ModelConfig()
@@ -72,9 +85,9 @@ func run() error {
 	}
 	data = append(data, '\n')
 
-	if err := os.WriteFile(jsonPath, data, 0o644); err != nil {
-		return fmt.Errorf("writing %s: %w", jsonPath, err)
+	if err := os.WriteFile(m.jsonPath, data, 0o644); err != nil {
+		return fmt.Errorf("writing %s: %w", m.jsonPath, err)
 	}
-	fmt.Printf("wrote %s (%d bytes)\n", jsonPath, len(data))
+	fmt.Printf("wrote %s (%d bytes)\n", m.jsonPath, len(data))
 	return nil
 }
