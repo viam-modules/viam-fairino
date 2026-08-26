@@ -65,11 +65,12 @@ type Config struct {
 	Host string `json:"host,omitempty"`
 
 	// Model selects which robot's kinematics/meshes to load: "fr5" (standard
-	// FR5) or "fr5-wml" (long-reach FR5-WML). Required — the controller does
-	// not report its own model over the protocol, so there is no reliable
-	// auto-detection and the config must state it explicitly (see kinematics.go
-	// and Validate). Validated against modelRegistry.
-	Model string `json:"model"`
+	// FR5) or "fr5-wml" (long-reach FR5-WML). Optional: if empty, the model is
+	// auto-detected at construction by querying the controller's
+	// GetSoftwareVersion (see NewFairino/detectModel). Set it explicitly to
+	// override detection or to let the arm construct while the robot is
+	// unreachable. Validated against modelRegistry when non-empty.
+	Model string `json:"model,omitempty"`
 
 	// ToolNum and WorkpieceNum select the active tool/workpiece coordinate
 	// frame (manual: 0-14 each) used for MoveJ's toolNum/workPieceNum
@@ -118,11 +119,12 @@ type Config struct {
 // resource.Dependencies map handed to NewFairino, not just it existing on
 // the robot.
 func (cfg *Config) Validate(path string) ([]string, []string, error) {
-	if cfg.Model == "" {
-		return nil, nil, fmt.Errorf("%s: model is required; supported models: %s", path, supportedModels())
-	}
-	if _, ok := modelRegistry[cfg.Model]; !ok {
-		return nil, nil, fmt.Errorf("%s: unsupported model %q; supported models: %s", path, cfg.Model, supportedModels())
+	// Model is optional — empty means auto-detect at construction. Only
+	// validate it when set.
+	if cfg.Model != "" {
+		if _, ok := modelRegistry[cfg.Model]; !ok {
+			return nil, nil, fmt.Errorf("%s: unsupported model %q; supported models: %s", path, cfg.Model, supportedModels())
+		}
 	}
 	for name, v := range map[string]int{
 		"tool_num":      cfg.ToolNum,
@@ -190,6 +192,36 @@ func newViamFairinoFairino(ctx context.Context, deps resource.Dependencies, rawC
 	return NewFairino(ctx, deps, rawConf.ResourceName(), conf, logger)
 }
 
+// detectModelTimeout bounds the GetSoftwareVersion round-trip used for model
+// auto-detection at construction, so a dead/wrong host fails fast instead of
+// hanging module startup.
+const detectModelTimeout = 5 * time.Second
+
+// detectModel queries the controller's GetSoftwareVersion (CMD_ID 905) and maps
+// its reported robotModel to a modelRegistry key. Returns an error if the query
+// fails (robot unreachable) or the robotModel is unrecognized — in both cases
+// the caller should tell the user to set model explicitly. The raw version
+// fields are logged so an unrecognized robotModel is visible for adding a
+// mapping.
+func detectModel(ctx context.Context, cmd *commandClient, logger logging.Logger) (string, error) {
+	ctx, cancel := context.WithTimeout(ctx, detectModelTimeout)
+	defer cancel()
+
+	robotModel, webVersion, controllerVersion, err := cmd.getSoftwareVersion(ctx)
+	if err != nil {
+		return "", fmt.Errorf("querying GetSoftwareVersion for model auto-detection: %w", err)
+	}
+	logger.CInfow(ctx, "queried robot software version for model auto-detection",
+		"robot_model", robotModel, "web_version", webVersion, "controller_version", controllerVersion)
+
+	model, ok := modelFromRobotModel(robotModel)
+	if !ok {
+		return "", fmt.Errorf("unrecognized robotModel %q (supported models: %s)", robotModel, supportedModels())
+	}
+	logger.CInfow(ctx, "auto-detected robot model", "model", model, "robot_model", robotModel)
+	return model, nil
+}
+
 func NewFairino(ctx context.Context, deps resource.Dependencies, name resource.Name, conf *Config, logger logging.Logger) (arm.Arm, error) {
 	cancelCtx, cancelFunc := context.WithCancel(context.Background())
 
@@ -198,13 +230,30 @@ func NewFairino(ctx context.Context, deps resource.Dependencies, name resource.N
 		host = defaultHost
 	}
 
-	model, err := makeModelFrame(name.Name, conf.Model, conf.UseURDF, conf.MeshDecimationRatios)
+	cmd := newCommandClient(host, commandPort, logger)
+
+	// Resolve the robot model. An explicit conf.Model wins (and lets the arm
+	// construct while the robot is unreachable); otherwise auto-detect it by
+	// querying the controller (detectModel), which needs a live connection.
+	modelName := conf.Model
+	if modelName == "" {
+		detected, err := detectModel(ctx, cmd, logger)
+		if err != nil {
+			cancelFunc()
+			return nil, fmt.Errorf("model not set in config and auto-detection failed "+
+				"(set model=%s explicitly): %w", supportedModels(), err)
+		}
+		modelName = detected
+	}
+
+	model, err := makeModelFrame(name.Name, modelName, conf.UseURDF, conf.MeshDecimationRatios)
 	if err != nil {
 		cancelFunc()
 		return nil, err
 	}
-	// conf.Model was validated in Validate, so this lookup can't miss.
-	assets := modelRegistry[conf.Model]
+	// modelName is either validated (Validate) or came from detectModel, so
+	// this lookup can't miss.
+	assets := modelRegistry[modelName]
 
 	// Resolve the motion service MoveToPosition delegates to (see its doc
 	// comment). An explicitly-named service is a hard dependency — fail
@@ -232,7 +281,7 @@ func NewFairino(ctx context.Context, deps resource.Dependencies, name resource.N
 		meshVisualDir: assets.meshVisualDir,
 		motion:        motionSvc,
 		status:        newStatusClient(host, statusPort, logger),
-		cmd:           newCommandClient(host, commandPort, logger),
+		cmd:           cmd,
 		opMgr:         operation.NewSingleOperationManager(),
 		cancelCtx:     cancelCtx,
 		cancelFunc:    cancelFunc,

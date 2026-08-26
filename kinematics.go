@@ -64,6 +64,23 @@ var modelRegistry = map[string]modelAssets{
 	},
 }
 
+// modelFromRobotModel maps the controller's reported robotModel string (from
+// GetSoftwareVersion — e.g. "FR5-V1-002(V6.0)" for a standard FR5, and
+// presumably "FR5-WML-..." for the long-reach variant) to a modelRegistry key.
+// WML is checked first since an FR5-WML string also contains "FR5". Returns
+// ("", false) if unrecognized, so the caller can fall back or error.
+func modelFromRobotModel(robotModel string) (string, bool) {
+	u := strings.ToUpper(robotModel)
+	switch {
+	case strings.Contains(u, "FR5") && strings.Contains(u, "WML"):
+		return ModelFR5WML, true
+	case strings.Contains(u, "FR5"):
+		return ModelFR5, true
+	default:
+		return "", false
+	}
+}
+
 // supportedModels returns the known model names, sorted, for error messages.
 func supportedModels() string {
 	names := make([]string, 0, len(modelRegistry))

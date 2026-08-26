@@ -220,6 +220,14 @@ const (
 	cmdIDStop          = 102 // manual §2.35, Table 2-48
 	cmdIDGetForwardKin = 377 // manual §6.3.24, Table 6-3-24
 
+	// cmdIDGetSoftwareVersion sends "GetSoftwareVersion()"; the response DATA
+	// is "<robotModel>,<webVersion>,<controllerVersion>" (verified against an
+	// FR5 on real hardware: "FR5-V1-002(V6.0),v3.9.4,V3.9.22-QX"). robotModel
+	// drives model auto-detection (kinematics.go's modelFromRobotModel). Same
+	// CMD_ID the vendor SDK uses over this port — see fairino-python-sdk
+	// testUDP1.py's raw "/f/b...905...GetSoftwareVersion()...".
+	cmdIDGetSoftwareVersion = 905
+
 	// cmdIDScriptError is NOT documented anywhere in the manual — found on
 	// real hardware. When a command handler fails, the controller's response
 	// frame doesn't echo the request's CMD_ID; it comes back as this CMD_ID
