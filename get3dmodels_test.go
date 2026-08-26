@@ -7,17 +7,18 @@ import (
 	"go.viam.com/rdk/logging"
 )
 
-// wantLinkNames are the 7 links in arm/fr5wml.urdf (no flange/tool frame in
-// this URDF, unlike the earlier FR5WM.urdf-derived one — see PLAN.md
-// STATUS).
+// wantLinkNames are the 7 links in arm/fr5wml.urdf that carry a visual mesh:
+// base_link plus the six actuated links link1..link6. The DH URDF also has
+// fixed frame1..frame5 and tool0 frames, but those are mesh-less and don't
+// appear in Get3DModels's output.
 var wantLinkNames = []string{
 	"base_link",
-	"shoulder_link",
-	"upperarm_link",
-	"forearm_link",
-	"wrist1_link",
-	"wrist2_link",
-	"wrist3_link",
+	"link1",
+	"link2",
+	"link3",
+	"link4",
+	"link5",
+	"link6",
 }
 
 func TestGet3DModelsUnsetModuleRoot(t *testing.T) {

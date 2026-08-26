@@ -727,9 +727,8 @@ const meshVisualDir = "arm/meshes/fr5wml/visual"
 // Get3DModels returns the bundled per-link visualization meshes as binary
 // glTF (GLB, model/gltf-binary — the app's 3D scene viewer renders glTF,
 // not PLY), keyed by link/frame name (the .glb filename minus extension,
-// e.g. "wrist3_Link.glb" -> "wrist3_Link", which matches the URDF's own
-// link names exactly since that's how they were generated — see PLAN.md
-// Steps 2/4).
+// e.g. "link6.glb" -> "link6", which matches the URDF's own link names
+// exactly since that's how they were generated — see arm/fr5wml_SOURCES.md).
 //
 // If VIAM_MODULE_ROOT is unset, logs a warning and returns an empty map
 // with a nil error rather than failing — 3D visualization is simply

@@ -11,11 +11,13 @@ import (
 
 // urdfRelPath is arm/fr5wml.urdf's location relative to the module's root
 // directory (VIAM_MODULE_ROOT, set by viam-server after unpacking the
-// module tarball). See PLAN.md STATUS/Step 1 for where this URDF actually
-// came from: a manually CAD-corrected copy of Fairino's fairino5_v6.urdf
-// (link lengths fixed; mass/inertia and meshes are still fairino5_v6's
-// originals and known to be inaccurate for now) — not FR5WM.urdf, which an
-// earlier pass discovered didn't match the physical FR5-WML at all.
+// module tarball). The URDF is generated from FAIRINO's published FR5-WML
+// Denavit-Hartenberg table (manual 3.9.4), with joint limits and rated
+// velocities from FAIRINO's FR5-WML specs — see arm/fr5wml_SOURCES.md. Its
+// meshes are simplified generated geometry (correct scale, not the official
+// STEP castings). This replaced an earlier placeholder that was a manually
+// link-corrected fairino5_v6.urdf whose wrist offsets/limits/velocities were
+// still fairino5_v6's and inaccurate for the FR5-WML.
 const urdfRelPath = "arm/fr5wml.urdf"
 
 // fr5wmlKinematicsJSON is the embedded default kinematics source — generated
