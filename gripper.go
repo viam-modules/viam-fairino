@@ -71,6 +71,12 @@ type GripperConfig struct {
 	// is distinguishable from unset.
 	OpenPosition *int `json:"open_position,omitempty"`
 	GrabPosition *int `json:"grab_position,omitempty"`
+
+	// StrokeMM is the gripper's total finger travel (fully closed to fully
+	// open) in mm, used to build the kinematic model so the fingers render
+	// open/closed in the 3D scene. Defaults to 145 (the AG-105-145); set it for
+	// other grippers.
+	StrokeMM float64 `json:"stroke_mm,omitempty"`
 }
 
 // Validate checks ranges. No dependencies.
@@ -102,6 +108,9 @@ type fairinoGripper struct {
 	client *xmlrpcClient
 	opMgr  *operation.SingleOperationManager
 
+	model    referenceframe.Model
+	strokeMM float64
+
 	speed   int
 	force   int
 	maxTime int
@@ -119,16 +128,26 @@ func newFairinoGripper(ctx context.Context, deps resource.Dependencies, rawConf 
 	if host == "" {
 		host = defaultHost
 	}
+	strokeMM := gripperStrokeMM
+	if conf.StrokeMM > 0 {
+		strokeMM = conf.StrokeMM
+	}
+	model, err := makeGripperModel(rawConf.ResourceName().ShortName(), strokeMM)
+	if err != nil {
+		return nil, err
+	}
 	g := &fairinoGripper{
-		name:    rawConf.ResourceName(),
-		logger:  logger,
-		client:  newXMLRPCClient(host, xmlrpcPort),
-		opMgr:   operation.NewSingleOperationManager(),
-		speed:   valueOr(conf.SpeedPercent, 50),
-		force:   valueOr(conf.ForcePercent, 50),
-		maxTime: valueOr(conf.MaxTimeMs, 30000),
-		openPos: ptrOr(conf.OpenPosition, 100),
-		grabPos: ptrOr(conf.GrabPosition, 0),
+		name:     rawConf.ResourceName(),
+		logger:   logger,
+		client:   newXMLRPCClient(host, xmlrpcPort),
+		opMgr:    operation.NewSingleOperationManager(),
+		model:    model,
+		strokeMM: strokeMM,
+		speed:    valueOr(conf.SpeedPercent, 50),
+		force:    valueOr(conf.ForcePercent, 50),
+		maxTime:  valueOr(conf.MaxTimeMs, 30000),
+		openPos:  ptrOr(conf.OpenPosition, 100),
+		grabPos:  ptrOr(conf.GrabPosition, 0),
 	}
 
 	if conf.Configure {
@@ -222,23 +241,47 @@ func (g *fairinoGripper) Stop(ctx context.Context, extra map[string]any) error {
 	return nil
 }
 
-// Geometries returns no geometry (the gripper is represented as a frameless
-// end-effector for now).
+// Geometries returns the gripper's body + finger geometry posed at the live
+// gripper position, so the 3D scene shows the fingers open/closed. On a failure
+// to read the position it falls back to the fully-open pose rather than
+// erroring, so visualization degrades gracefully.
 func (g *fairinoGripper) Geometries(ctx context.Context, extra map[string]any) ([]spatialmath.Geometry, error) {
-	return nil, nil
+	inputs, err := g.CurrentInputs(ctx)
+	if err != nil {
+		inputs = positionToInputs(100, g.strokeMM)
+	}
+	gif, err := g.model.Geometries(inputs)
+	if err != nil {
+		return nil, err
+	}
+	return gif.Geometries(), nil
 }
 
-// Kinematics returns a trivial (0-DoF) model — the gripper has no articulated
-// joints exposed to the frame system.
+// Kinematics returns the 2-DoF finger model (gripper_kinematics.go) so the
+// frame system can render the gripper opening and closing.
 func (g *fairinoGripper) Kinematics(ctx context.Context) (referenceframe.Model, error) {
-	return referenceframe.NewSimpleModel(g.name.ShortName()), nil
+	return g.model, nil
 }
 
+// CurrentInputs reads the live gripper position (GetGripperCurPosition, 0-100%)
+// and maps it to the model's two prismatic finger inputs, so Kinematics/
+// Geometries reflect how open the gripper actually is.
 func (g *fairinoGripper) CurrentInputs(ctx context.Context) ([]referenceframe.Input, error) {
-	return []referenceframe.Input{}, nil
+	pos, err := g.client.callChecked(ctx, "GetGripperCurPosition")
+	if err != nil {
+		return nil, err
+	}
+	return positionToInputs(float64(intAt(pos, 1)), g.strokeMM), nil
 }
 
+// GoToInputs drives the fingers to the requested opening by mapping the joint
+// input back to a percentage and issuing MoveGripper.
 func (g *fairinoGripper) GoToInputs(ctx context.Context, inputs ...[]referenceframe.Input) error {
+	for _, in := range inputs {
+		if err := g.moveGripper(ctx, int(inputsToPercent(in, g.strokeMM))); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 
