@@ -68,8 +68,21 @@ func (c *xmlrpcClient) call(ctx context.Context, method string, params ...any) (
 	return vals, nil
 }
 
+// ControllerError is a non-zero errcode returned by a Fairino XML-RPC method.
+// Callers can inspect Code (via errors.As) to react to specific controller
+// errors, e.g. errcode 73 ("gripper movement error").
+type ControllerError struct {
+	Method string
+	Code   int
+}
+
+func (e *ControllerError) Error() string {
+	return fmt.Sprintf("xmlrpc %s: controller errcode %d", e.Method, e.Code)
+}
+
 // callChecked calls method and verifies the leading int errcode is 0,
-// returning the trailing values (everything after the errcode).
+// returning the trailing values (everything after the errcode). A non-zero
+// errcode is returned as a *ControllerError.
 func (c *xmlrpcClient) callChecked(ctx context.Context, method string, params ...any) ([]any, error) {
 	vals, err := c.call(ctx, method, params...)
 	if err != nil {
@@ -83,7 +96,7 @@ func (c *xmlrpcClient) callChecked(ctx context.Context, method string, params ..
 		return nil, fmt.Errorf("xmlrpc %s: leading value %v (%T) is not an errcode", method, vals[0], vals[0])
 	}
 	if code != 0 {
-		return nil, fmt.Errorf("xmlrpc %s: controller errcode %d", method, code)
+		return nil, &ControllerError{Method: method, Code: code}
 	}
 	return vals[1:], nil
 }

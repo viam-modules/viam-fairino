@@ -12,7 +12,10 @@ package viamfairino
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"sync"
+	"time"
 
 	"go.viam.com/rdk/components/gripper"
 	"go.viam.com/rdk/logging"
@@ -58,6 +61,13 @@ type GripperConfig struct {
 	// the gripper. Defaults to true; set false to skip (e.g. for bring-up).
 	Activate *bool `json:"activate,omitempty"`
 
+	// ActivateWaitMs is how long to wait after ActGripper for the gripper to
+	// finish its activation homing before it will accept a move. Activating
+	// (and resetting) drives a physical homing motion that takes seconds;
+	// moving before it completes fails with controller errcode 73 ("gripper
+	// movement error"). Default 3000.
+	ActivateWaitMs int `json:"activate_wait_ms,omitempty"`
+
 	// SpeedPercent / ForcePercent are the vel/force passed to MoveGripper
 	// (0-100). Default 50 each.
 	SpeedPercent int `json:"speed_percent,omitempty"`
@@ -100,6 +110,12 @@ func (cfg *GripperConfig) Validate(path string) ([]string, []string, error) {
 // config.
 const gripperIndex = 1
 
+// errcodeGripperMove is the controller errcode for "gripper movement error"
+// ("check whether the communication status of the gripper is normal"). It
+// comes back from MoveGripper when the gripper isn't activated/ready, so we
+// treat it as a signal to re-activate and retry.
+const errcodeGripperMove = 73
+
 type fairinoGripper struct {
 	resource.AlwaysRebuild
 
@@ -111,11 +127,14 @@ type fairinoGripper struct {
 	model    referenceframe.Model
 	strokeMM float64
 
-	speed   int
-	force   int
-	maxTime int
-	openPos int
-	grabPos int
+	speed        int
+	force        int
+	maxTime      int
+	openPos      int
+	grabPos      int
+	activateWait time.Duration
+
+	actMu sync.Mutex // serializes (re)activation
 }
 
 func newFairinoGripper(ctx context.Context, deps resource.Dependencies, rawConf resource.Config, logger logging.Logger) (gripper.Gripper, error) {
@@ -123,7 +142,14 @@ func newFairinoGripper(ctx context.Context, deps resource.Dependencies, rawConf 
 	if err != nil {
 		return nil, err
 	}
+	return NewFairinoGripper(ctx, rawConf.ResourceName(), conf, logger)
+}
 
+// NewFairinoGripper builds a Fairino gripper from an already-parsed config. It
+// is the shared core of the registered constructor, exported so tools (e.g.
+// cmd/fairino-test) can drive a real gripper without going through resource
+// registration.
+func NewFairinoGripper(ctx context.Context, name resource.Name, conf *GripperConfig, logger logging.Logger) (gripper.Gripper, error) {
 	host := conf.Host
 	if host == "" {
 		host = defaultHost
@@ -132,22 +158,23 @@ func newFairinoGripper(ctx context.Context, deps resource.Dependencies, rawConf 
 	if conf.StrokeMM > 0 {
 		strokeMM = conf.StrokeMM
 	}
-	model, err := makeGripperModel(rawConf.ResourceName().ShortName(), strokeMM)
+	model, err := makeGripperModel(name.ShortName(), strokeMM)
 	if err != nil {
 		return nil, err
 	}
 	g := &fairinoGripper{
-		name:     rawConf.ResourceName(),
-		logger:   logger,
-		client:   newXMLRPCClient(host, xmlrpcPort),
-		opMgr:    operation.NewSingleOperationManager(),
-		model:    model,
-		strokeMM: strokeMM,
-		speed:    valueOr(conf.SpeedPercent, 50),
-		force:    valueOr(conf.ForcePercent, 50),
-		maxTime:  valueOr(conf.MaxTimeMs, 30000),
-		openPos:  ptrOr(conf.OpenPosition, 100),
-		grabPos:  ptrOr(conf.GrabPosition, 0),
+		name:         name,
+		logger:       logger,
+		client:       newXMLRPCClient(host, xmlrpcPort),
+		opMgr:        operation.NewSingleOperationManager(),
+		model:        model,
+		strokeMM:     strokeMM,
+		speed:        valueOr(conf.SpeedPercent, 50),
+		force:        valueOr(conf.ForcePercent, 50),
+		maxTime:      valueOr(conf.MaxTimeMs, 30000),
+		openPos:      ptrOr(conf.OpenPosition, 100),
+		grabPos:      ptrOr(conf.GrabPosition, 0),
+		activateWait: time.Duration(valueOr(conf.ActivateWaitMs, 3000)) * time.Millisecond,
 	}
 
 	if conf.Configure {
@@ -159,7 +186,7 @@ func newFairinoGripper(ctx context.Context, deps resource.Dependencies, rawConf 
 	}
 
 	if conf.Activate == nil || *conf.Activate {
-		if _, err := g.client.callChecked(ctx, "ActGripper", gripperIndex, 1); err != nil {
+		if err := g.activate(ctx, false); err != nil {
 			// Don't fail construction — surface it so the resource comes up and
 			// the user can inspect/config via DoCommand. Activation typically
 			// fails only when no gripper is configured on the controller.
@@ -171,12 +198,71 @@ func newFairinoGripper(ctx context.Context, deps resource.Dependencies, rawConf 
 	return g, nil
 }
 
-// moveGripper issues a blocking MoveGripper to pos (0-100). type=0 / rot* = 0
-// are the parallel two-finger (non-rotary) values; rotNum is a double.
+// activate activates the gripper and waits activateWait for its activation
+// homing to finish before it will accept moves. When reset is true it first
+// issues an ActGripper reset (action 0) and waits — used to recover a gripper
+// that has dropped out or faulted (this is what the vendor examples do before
+// re-activating). Serialized so a move-triggered re-activation can't race
+// startup activation.
+func (g *fairinoGripper) activate(ctx context.Context, reset bool) error {
+	g.actMu.Lock()
+	defer g.actMu.Unlock()
+
+	if reset {
+		if _, err := g.client.callChecked(ctx, "ActGripper", gripperIndex, 0); err != nil {
+			return fmt.Errorf("ActGripper reset: %w", err)
+		}
+		if !sleepCtx(ctx, g.activateWait) {
+			return ctx.Err()
+		}
+	}
+	if _, err := g.client.callChecked(ctx, "ActGripper", gripperIndex, 1); err != nil {
+		return fmt.Errorf("ActGripper activate: %w", err)
+	}
+	if !sleepCtx(ctx, g.activateWait) {
+		return ctx.Err()
+	}
+	return nil
+}
+
+// moveGripper issues a blocking MoveGripper to pos (0-100), so the call returns
+// only once the fingers have reached position (or maxTime elapses) — Open/Grab
+// depend on that, and Grab's hold check must run after the motion completes.
+//
+// If the controller reports errcode 73 ("gripper movement error"), the gripper
+// is not activated/ready; we reset+re-activate it once and retry, since this
+// happens when the gripper wasn't activated in time or dropped out.
 func (g *fairinoGripper) moveGripper(ctx context.Context, pos int) error {
-	_, err := g.client.callChecked(ctx, "MoveGripper",
-		gripperIndex, pos, g.speed, g.force, g.maxTime, 1 /*block*/, 0 /*type*/, 0.0 /*rotNum*/, 0 /*rotVel*/, 0 /*rotTorque*/)
+	err := g.moveGripperOnce(ctx, pos)
+	if !isControllerErrcode(err, errcodeGripperMove) {
+		return err
+	}
+	g.logger.CWarnw(ctx, "MoveGripper failed with gripper-movement error (73); re-activating gripper and retrying", "pos", pos)
+	if aerr := g.activate(ctx, true); aerr != nil {
+		g.logger.CWarnw(ctx, "gripper re-activation failed", "err", aerr)
+	}
+	err = g.moveGripperOnce(ctx, pos)
+	if isControllerErrcode(err, errcodeGripperMove) {
+		return fmt.Errorf("gripper move failed (controller errcode 73, gripper movement error): confirm a "+
+			"gripper is configured and its peripheral protocol is enabled on the controller (WebApp/teach "+
+			"pendant), and that it is powered and communicating: %w", err)
+	}
 	return err
+}
+
+// moveGripperOnce issues a single blocking MoveGripper to pos (0-100). block=0
+// is blocking (per the vendor SDK: 0-blocking, 1-non-blocking); type=0 / rot*
+// are the parallel two-finger (non-rotary) values; rotNum is a double.
+func (g *fairinoGripper) moveGripperOnce(ctx context.Context, pos int) error {
+	_, err := g.client.callChecked(ctx, "MoveGripper",
+		gripperIndex, pos, g.speed, g.force, g.maxTime, 0 /*block*/, 0 /*type*/, 0.0 /*rotNum*/, 0 /*rotVel*/, 0 /*rotTorque*/)
+	return err
+}
+
+// isControllerErrcode reports whether err is a *ControllerError with the given code.
+func isControllerErrcode(err error, code int) bool {
+	var ce *ControllerError
+	return errors.As(err, &ce) && ce.Code == code
 }
 
 func (g *fairinoGripper) Open(ctx context.Context, extra map[string]any) error {
@@ -314,9 +400,12 @@ func (g *fairinoGripper) Close(ctx context.Context) error { return nil }
 //   - "gripper_config": GetGripperConfig -> [company, device, software_version, bus]
 //   - "software_version": GetSoftwareVersion
 //   - "status": current position + (fault,status) from GetGripperMotionDone
-//   - "activate" / "deactivate": ActGripper(index, 1|0)
+//   - "activate": reset + activate (ActGripper 0 then 1) with waits
+//   - "deactivate": ActGripper(index, 0)
+//   - "reset_error": ResetAllError (clears controller errors)
 //   - "set_config": SetGripperConfig using company/device/software_version/bus keys
 //   - "move": MoveGripper to "position" (0-100), optional "speed"/"force"
+//   - "diag": raw dump of GetRobotErrorCode/GetGripperMotionDone/etc. for bring-up
 func (g *fairinoGripper) DoCommand(ctx context.Context, cmd map[string]any) (map[string]any, error) {
 	command, _ := cmd["command"].(string)
 	switch command {
@@ -348,15 +437,35 @@ func (g *fairinoGripper) DoCommand(ctx context.Context, cmd map[string]any) (map
 			"position": intAt(pos, 1), "position_fault": intAt(pos, 0),
 			"motion_fault": fault, "motion_status": status,
 		}, nil
-	case "activate", "deactivate":
-		act := 1
-		if command == "deactivate" {
-			act = 0
-		}
-		if _, err := g.client.callChecked(ctx, "ActGripper", gripperIndex, act); err != nil {
+	case "activate":
+		// Reset first, then activate, waiting for the homing to complete —
+		// matches the recovery path so manual activation from the UI is enough
+		// to clear an errcode-73 gripper.
+		if err := g.activate(ctx, true); err != nil {
 			return nil, err
 		}
 		return map[string]any{"ok": true}, nil
+	case "deactivate":
+		if _, err := g.client.callChecked(ctx, "ActGripper", gripperIndex, 0); err != nil {
+			return nil, err
+		}
+		return map[string]any{"ok": true}, nil
+	case "reset_error":
+		if _, err := g.client.callChecked(ctx, "ResetAllError"); err != nil {
+			return nil, err
+		}
+		return map[string]any{"ok": true}, nil
+	case "diag":
+		out := map[string]any{}
+		for _, m := range []string{"GetRobotErrorCode", "GetSafetyCode", "GetGripperMotionDone", "GetGripperCurPosition", "GetGripperConfig"} {
+			vals, err := g.client.call(ctx, m)
+			if err != nil {
+				out[m] = "ERR: " + err.Error()
+			} else {
+				out[m] = fmt.Sprintf("%v", vals)
+			}
+		}
+		return out, nil
 	case "set_config":
 		if _, err := g.client.callChecked(ctx, "SetGripperConfig",
 			intFromCmd(cmd, "company"), intFromCmd(cmd, "device"),

@@ -1,9 +1,25 @@
 package viamfairino
 
 import (
+	"fmt"
 	"reflect"
 	"testing"
 )
+
+func TestControllerErrorDetection(t *testing.T) {
+	// A wrapped ControllerError with code 73 is detected; a different code or a
+	// plain error is not — this drives the gripper's re-activate-and-retry path.
+	err := fmt.Errorf("gripper move: %w", &ControllerError{Method: "MoveGripper", Code: 73})
+	if !isControllerErrcode(err, 73) {
+		t.Errorf("expected errcode 73 to be detected in %v", err)
+	}
+	if isControllerErrcode(err, 74) {
+		t.Errorf("did not expect errcode 74 to match %v", err)
+	}
+	if isControllerErrcode(fmt.Errorf("some other error"), 73) {
+		t.Errorf("plain error should not match errcode 73")
+	}
+}
 
 func TestParseXMLRPCResponseArray(t *testing.T) {
 	// Real GetSoftwareVersion response captured from an FR5.
