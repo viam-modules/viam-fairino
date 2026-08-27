@@ -1,29 +1,32 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- This URDF was automatically created by SolidWorks to URDF Exporter! Originally created by Stephen Brawner (brawner@gmail.com) 
-     Commit Version: 1.5.1-0-g916b5db  Build Version: 1.5.7152.31018
-     For more information, please see http://wiki.ros.org/sw_urdf_exporter -->
+<!-- Cleaned/converted from temp/FR5WML.urdf (hand-tuned against the FR5-WML
+     CAD step-file meshes; see temp/conversion_scripts/ for the generation
+     pipeline and PLAN.md for the full history). Link names lowercased and
+     mesh filenames rewritten to arm/meshes/fr5wml/{visual,collision}/ by
+     01_copy_and_rewrite_urdf.py; do not hand-edit this file directly,
+     re-run the conversion pipeline against temp/FR5WML.urdf instead. -->
 <robot
-  name="fairino5_v6_robot">
+  name="fr5wml">
   <link
     name="base_link">
     <inertial>
       <origin
-        xyz="-0.00031896 -0.00029673 0.042463"
+        xyz="-0.00049027 -0.00045095 0.032527"
         rpy="0 0 0" />
       <mass
-        value="1.6185" />
+        value="0.78393" />
       <inertia
-        ixx="0.0030836"
-        ixy="1.5354E-05"
-        ixz="-1.9315E-05"
-        iyy="0.0030825"
-        iyz="-1.7918E-05"
-        izz="0.0045209" />
+        ixx="0.0013854"
+        ixy="1.1455E-05"
+        ixz="-1.0642E-05"
+        iyy="0.0013849"
+        iyz="-9.7435E-06"
+        izz="0.001977" />
     </inertial>
     <visual>
       <origin
         xyz="0 0 0"
-        rpy="0 0 0" />
+        rpy="1.5708 0 0" />
       <geometry>
         <mesh
           filename="meshes/fr5wml/visual/base_link.glb" />
@@ -31,13 +34,13 @@
       <material
         name="">
         <color
-          rgba="0.89804 0.91765 0.92941 1" />
+          rgba="1 1 1 1" />
       </material>
     </visual>
     <collision>
       <origin
         xyz="0 0 0"
-        rpy="0 0 0" />
+        rpy="1.5708 0 0" />
       <geometry>
         <mesh
           filename="meshes/fr5wml/collision/base_link.STL" />
@@ -48,22 +51,22 @@
     name="shoulder_link">
     <inertial>
       <origin
-        xyz="5.0029E-07 -0.0040922 0.14629"
+        xyz="-3.6139E-07 -0.0024164 0.13521"
         rpy="0 0 0" />
       <mass
-        value="4.3771" />
+        value="2.26" />
       <inertia
-        ixx="0.010731"
-        ixy="-8.0587E-09"
-        ixz="-3.6773E-08"
-        iyy="0.010408"
-        iyz="0.00012853"
-        izz="0.0081793" />
+        ixx="0.0033227"
+        ixy="-5.0648E-08"
+        ixz="-6.3401E-09"
+        iyy="0.0032419"
+        iyz="4.3768E-05"
+        izz="0.0023129" />
     </inertial>
     <visual>
       <origin
         xyz="0 0 0"
-        rpy="0 0 0" />
+        rpy="-1.5708 0 0" />
       <geometry>
         <mesh
           filename="meshes/fr5wml/visual/shoulder_link.glb" />
@@ -71,13 +74,13 @@
       <material
         name="">
         <color
-          rgba="0.89804 0.91765 0.92941 1" />
+          rgba="1 1 1 1" />
       </material>
     </visual>
     <collision>
       <origin
         xyz="0 0 0"
-        rpy="0 0 0" />
+        rpy="-1.5708 0 0" />
       <geometry>
         <mesh
           filename="meshes/fr5wml/collision/shoulder_link.STL" />
@@ -88,7 +91,7 @@
     name="j1"
     type="revolute">
     <origin
-      xyz="0 0 0"
+      xyz="0 0 0.141"
       rpy="0 0 0" />
     <parent
       link="base_link" />
@@ -97,8 +100,8 @@
     <axis
       xyz="0 0 1" />
     <limit
-      lower="-3.0543"
-      upper="3.0543"
+      lower="-3.124"
+      upper="3.124"
       effort="150"
       velocity="3.15" />
     <calibration
@@ -108,31 +111,31 @@
       damping="0"
       friction="0" />
     <safety_controller
-      soft_lower_limit="-3.0543"
-      soft_upper_limit="3.0543"
-      k_position="15"
-      k_velocity="10" />
+      soft_upper="0"
+      soft_lower="0"
+      k_position="0"
+      k_velocity="0" />
   </joint>
   <link
     name="upperarm_link">
     <inertial>
       <origin
-        xyz="-0.2125 -5.7643E-09 0.1346"
+        xyz="-0.19609 1.3185E-07 0.11207"
         rpy="0 0 0" />
       <mass
-        value="14.458" />
+        value="4.53" />
       <inertia
-        ixx="0.028392"
-        ixy="-1.337E-07"
-        ixz="-3.9895E-09"
-        iyy="0.4559"
-        iyz="4.214E-08"
-        izz="0.44974" />
+        ixx="0.0087492"
+        ixy="7.5596E-08"
+        ixz="1.1257E-05"
+        iyy="0.045099"
+        iyz="-4.721E-10"
+        izz="0.043531" />
     </inertial>
     <visual>
       <origin
-        xyz="0 0 0"
-        rpy="0 0 0" />
+        xyz="-0.27 0 0"
+        rpy="3.1415 0 -1.5708" />
       <geometry>
         <mesh
           filename="meshes/fr5wml/visual/upperarm_link.glb" />
@@ -145,8 +148,8 @@
     </visual>
     <collision>
       <origin
-        xyz="0 0 0"
-        rpy="0 0 0" />
+        xyz="-0.27 0 0"
+        rpy="3.1415 0 -1.5708" />
       <geometry>
         <mesh
           filename="meshes/fr5wml/collision/upperarm_link.STL" />
@@ -157,7 +160,7 @@
     name="j2"
     type="revolute">
     <origin
-      xyz="0 0 0.18"
+      xyz="0 0 0.039"
       rpy="1.5708 0 0" />
     <parent
       link="shoulder_link" />
@@ -166,8 +169,8 @@
     <axis
       xyz="0 0 1" />
     <limit
-      lower="-4.6251"
-      upper="1.4835"
+      lower="-4.6949"
+      upper="1.5533"
       effort="150"
       velocity="3.15" />
     <calibration
@@ -177,31 +180,31 @@
       damping="0"
       friction="0" />
     <safety_controller
-      soft_lower_limit="-4.6251"
-      soft_upper_limit="1.4835"
-      k_position="15"
-      k_velocity="10" />
+      soft_upper="0"
+      soft_lower="0"
+      k_position="0"
+      k_velocity="0" />
   </joint>
   <link
     name="forearm_link">
     <inertial>
       <origin
-        xyz="-0.18793 -8.4503E-07 0.0066357"
+        xyz="-0.00344 -1.5607E-07 0.014599"
         rpy="0 0 0" />
       <mass
-        value="7.6737" />
+        value="1.56" />
       <inertia
-        ixx="0.0085096"
-        ixy="2.1613E-06"
-        ixz="-0.0068678"
-        iyy="0.16971"
-        iyz="3.7086E-08"
-        izz="0.16854" />
+        ixx="0.0014524"
+        ixy="6.8087E-09"
+        ixz="-3.2511E-05"
+        iyy="0.0020112"
+        iyz="-2.4944E-08"
+        izz="0.0019076" />
     </inertial>
     <visual>
       <origin
-        xyz="0 0 0"
-        rpy="0 0 0" />
+        xyz="0.464 0 0"
+        rpy="3.14159 0 -1.5708" />
       <geometry>
         <mesh
           filename="meshes/fr5wml/visual/forearm_link.glb" />
@@ -214,8 +217,8 @@
     </visual>
     <collision>
       <origin
-        xyz="0 0 0"
-        rpy="0 0 0" />
+        xyz="0.464 0 0"
+        rpy="3.14159 0 -1.5708" />
       <geometry>
         <mesh
           filename="meshes/fr5wml/collision/forearm_link.STL" />
@@ -235,8 +238,8 @@
     <axis
       xyz="0 0 1" />
     <limit
-      lower="-2.8274"
-      upper="2.8274"
+      lower="-2.40855"
+      upper="2.40855"
       effort="150"
       velocity="3.15" />
     <calibration
@@ -246,31 +249,31 @@
       damping="0"
       friction="0" />
     <safety_controller
-      soft_lower_limit="-2.8274"
-      soft_upper_limit="2.8274"
-      k_position="15"
-      k_velocity="10" />
+      soft_upper="0"
+      soft_lower="0"
+      k_position="0"
+      k_velocity="0" />
   </joint>
   <link
     name="wrist1_link">
     <inertial>
       <origin
-        xyz="4.98E-07 -0.003754 0.097155"
+        xyz="0.0010775 -4.849E-07 0.23673"
         rpy="0 0 0" />
       <mass
-        value="1.6266" />
+        value="1.97" />
       <inertia
-        ixx="0.00216"
-        ixy="4.888E-09"
-        ixz="3.1528E-08"
-        iyy="0.0015455"
-        iyz="3.7678E-05"
-        izz="0.0019902" />
+        ixx="0.054511"
+        ixy="2.1827E-08"
+        ixz="-0.0010509"
+        iyy="0.055102"
+        iyz="1.2523E-07"
+        izz="0.0047409" />
     </inertial>
     <visual>
       <origin
         xyz="0 0 0"
-        rpy="0 0 0" />
+        rpy="1.5708 0 -1.5708" />
       <geometry>
         <mesh
           filename="meshes/fr5wml/visual/wrist1_link.glb" />
@@ -284,7 +287,7 @@
     <collision>
       <origin
         xyz="0 0 0"
-        rpy="0 0 0" />
+        rpy="1.5708 0 -1.5708" />
       <geometry>
         <mesh
           filename="meshes/fr5wml/collision/wrist1_link.STL" />
@@ -295,17 +298,17 @@
     name="j4"
     type="revolute">
     <origin
-      xyz="-0.816 0 0"
-      rpy="0 0 0" />
+      xyz="-0.816 0 0.151"
+      rpy="1.5708 0 -1.5708" />
     <parent
       link="forearm_link" />
     <child
       link="wrist1_link" />
     <axis
-      xyz="0 0 1" />
+      xyz="0 1 0" />
     <limit
-      lower="-4.6251"
-      upper="1.4835"
+      lower="-3.124"
+      upper="3.124"
       effort="28"
       velocity="3.2" />
     <calibration
@@ -315,31 +318,31 @@
       damping="0"
       friction="0" />
     <safety_controller
-      soft_lower_limit="-4.6251"
-      soft_upper_limit="1.4835"
-      k_position="15"
-      k_velocity="10" />
+      soft_upper="0"
+      soft_lower="0"
+      k_position="0"
+      k_velocity="0" />
   </joint>
   <link
     name="wrist2_link">
     <inertial>
       <origin
-        xyz="-4.5588E-07 0.0038617 0.098257"
+        xyz="-0.00344 1.5604E-07 0.098294"
         rpy="0 0 0" />
       <mass
-        value="1.5812" />
+        value="1.56" />
       <inertia
-        ixx="0.0020612"
-        ixy="8.7064E-09"
-        ixz="-3.4742E-08"
-        iyy="0.0014477"
-        iyz="-2.8534E-05"
-        izz="0.0019573" />
+        ixx="0.0014524"
+        ixy="-6.8085E-09"
+        ixz="3.2511E-05"
+        iyy="0.0020112"
+        iyz="-2.4945E-08"
+        izz="0.0019076" />
     </inertial>
     <visual>
       <origin
         xyz="0 0 0"
-        rpy="0 0 0" />
+        rpy="0 1.5708 0" />
       <geometry>
         <mesh
           filename="meshes/fr5wml/visual/wrist2_link.glb" />
@@ -347,13 +350,13 @@
       <material
         name="">
         <color
-          rgba="0.89804 0.91765 0.92941 1" />
+          rgba="1 1 1 1" />
       </material>
     </visual>
     <collision>
       <origin
         xyz="0 0 0"
-        rpy="0 0 0" />
+        rpy="0 1.5708 0" />
       <geometry>
         <mesh
           filename="meshes/fr5wml/collision/wrist2_link.STL" />
@@ -364,8 +367,8 @@
     name="j5"
     type="revolute">
     <origin
-      xyz="0 0 0.114"
-      rpy="1.5708 0 0" />
+      xyz="0.11 0 0"
+      rpy="-1.5708 0 -1.5708" />
     <parent
       link="wrist1_link" />
     <child
@@ -373,8 +376,8 @@
     <axis
       xyz="0 0 1" />
     <limit
-      lower="-3.0543"
-      upper="3.0543"
+      lower="-1.5533"
+      upper="4.6949"
       effort="28"
       velocity="3.2" />
     <calibration
@@ -384,31 +387,31 @@
       damping="0"
       friction="0" />
     <safety_controller
-      soft_lower_limit="-3.0543"
-      soft_upper_limit="3.0543"
-      k_position="15"
-      k_velocity="10" />
+      soft_upper="0"
+      soft_lower="0"
+      k_position="0"
+      k_velocity="0" />
   </joint>
   <link
     name="wrist3_link">
     <inertial>
       <origin
-        xyz="7.7496E-05 1.7751E-05 0.076122"
+        xyz="7.559E-05 1.3854E-05 -0.023381"
         rpy="0 0 0" />
       <mass
-        value="0.52542" />
+        value="0.35" />
       <inertia
-        ixx="0.00027721"
-        ixy="-1.8677E-09"
-        ixz="-1.188E-07"
-        iyy="0.00027839"
-        iyz="2.2607E-07"
-        izz="0.00041605" />
+        ixx="0.00028785"
+        ixy="-2.0582E-09"
+        ixz="-1.3892E-07"
+        iyy="0.00028896"
+        iyz="1.8115E-07"
+        izz="0.00042655" />
     </inertial>
     <visual>
       <origin
         xyz="0 0 0"
-        rpy="0 0 0" />
+        rpy="1.5708 0 0" />
       <geometry>
         <mesh
           filename="meshes/fr5wml/visual/wrist3_link.glb" />
@@ -416,13 +419,13 @@
       <material
         name="">
         <color
-          rgba="0.89804 0.91765 0.92941 1" />
+          rgba="1 1 1 1" />
       </material>
     </visual>
     <collision>
       <origin
         xyz="0 0 0"
-        rpy="0 0 0" />
+        rpy="1.5708 0 0" />
       <geometry>
         <mesh
           filename="meshes/fr5wml/collision/wrist3_link.STL" />
@@ -433,8 +436,8 @@
     name="j6"
     type="revolute">
     <origin
-      xyz="0 0 0.106"
-      rpy="-1.5708 0 0" />
+      xyz="-0.1 0 0"
+      rpy="-1.5708 0 1.5708" />
     <parent
       link="wrist2_link" />
     <child
@@ -442,8 +445,8 @@
     <axis
       xyz="0 0 1" />
     <limit
-      lower="-3.0543"
-      upper="3.0543"
+      lower="-3.124"
+      upper="3.124"
       effort="28"
       velocity="3.2" />
     <calibration
@@ -453,9 +456,22 @@
       damping="0"
       friction="0" />
     <safety_controller
-      soft_lower_limit="-3.0543"
-      soft_upper_limit="3.0543"
-      k_position="15"
-      k_velocity="10" />
+      soft_upper="0"
+      soft_lower="0"
+      k_position="0"
+      k_velocity="0" />
+  </joint>
+  <link
+    name="link_eef" />
+  <joint
+    name="joint_eef"
+    type="fixed">
+    <origin
+      xyz="0 0 0"
+      rpy="0 0 0" />
+    <parent
+      link="wrist3_link" />
+    <child
+      link="link_eef" />
   </joint>
 </robot>

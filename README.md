@@ -28,7 +28,7 @@ include a `"frame"` block**, at minimum a `parent`:
 {
   "name": "fairino",
   "api": "rdk:component:arm",
-  "model": "3a94d2f9082b44ad8569a9d8a1330050:viam-fairino:fairino",
+  "model": "viam-soleng:viam-fairino:fairino",
   "attributes": { "host": "192.168.58.2" },
   "frame": { "parent": "world" }
 }
@@ -44,7 +44,7 @@ don't need it, only `MoveToPosition`.
 
 This module provides the following model(s):
 
-- [`3a94d2f9082b44ad8569a9d8a1330050:viam-fairino:fairino`](3a94d2f9082b44ad8569a9d8a1330050_viam-fairino_fairino.md) - Fairino FR5-WML arm
+- [`viam-soleng:viam-fairino:fairino`](3a94d2f9082b44ad8569a9d8a1330050_viam-fairino_fairino.md) - Fairino FR5-WML arm
 
 ## Configuration
 
