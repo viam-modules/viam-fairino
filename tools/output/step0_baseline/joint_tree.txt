@@ -1,7 +1,0 @@
-joint            type       parent           child            xyz              rpy                     lower    upper
-j1               revolute   base_link        shoulder_Link    0 0 0            0 0 0                  -3.124    3.124
-j2               revolute   shoulder_Link    upperarm_Link    0 0 0.14         1.5708 0 0            -4.6949   1.5533
-j3               revolute   upperarm_Link    forearm_Link     -0.42 0 0.001107 0 0 0                -2.40855  2.40855
-j4               revolute   forearm_Link     wrist1_Link      0 0 0.010893     1.5708 0 -1.5708       -3.124    3.124
-j5               revolute   wrist1_Link      wrist2_Link      0 0 0.36         -1.5708 0 -1.5708     -1.5533   4.6949
-j6               revolute   wrist2_Link      wrist3_Link      -0.1 0 0.102     -1.5708 0 1.5708       -3.124    3.124
