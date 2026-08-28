@@ -48,7 +48,7 @@ import (
 	rdkutils "go.viam.com/rdk/utils"
 )
 
-var Fairino = resource.NewModel("3a94d2f9082b44ad8569a9d8a1330050", "viam-fairino", "fairino")
+var Fairino = resource.NewModel("viam-soleng", "viam-fairino", "fairino")
 
 func init() {
 	resource.RegisterComponent(arm.API, Fairino,

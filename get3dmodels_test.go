@@ -8,11 +8,10 @@ import (
 )
 
 // wantLinkNames maps each model to the 7 links in its URDF that carry a visual
-// mesh. FR5-WML's DH URDF uses base_link + link1..link6 (its fixed frame1..5
-// and tool0 frames are mesh-less); FR5's SolidWorks URDF uses the vendor's
-// descriptive link names. Get3DModels keys meshes by these names.
+// mesh. Both models' URDFs use the vendor's descriptive link names.
+// Get3DModels keys meshes by these names.
 var wantLinkNames = map[string][]string{
-	ModelFR5WML: {"base_link", "link1", "link2", "link3", "link4", "link5", "link6"},
+	ModelFR5WML: {"base_link", "shoulder_link", "upperarm_link", "forearm_link", "wrist1_link", "wrist2_link", "wrist3_link"},
 	ModelFR5:    {"base_link", "shoulder_link", "upperarm_link", "forearm_link", "wrist1_link", "wrist2_link", "wrist3_link"},
 }
 

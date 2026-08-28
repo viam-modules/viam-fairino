@@ -1,195 +1,478 @@
-<?xml version="1.0" ?>
-<!-- FAIRINO FR5-WML URDF.
-     Kinematics generated from FAIRINO's published FR5-WML Denavit-Hartenberg
-     table (Collaborative Robot User Manual, generation 3.9.4); joint limits and
-     rated joint velocities from FAIRINO's FR5-WML published specifications.
-     See arm/fr5wml_SOURCES.md for source URLs.
-
-     Each DH row is represented as a revolute jN followed by a fixed jN_dh
-     transform, so the FAIRINO joint variables map directly to the published DH
-     theta terms. The six actuated joints are j1..j6; the interleaved jN_dh
-     joints and tool0 are fixed.
-
-     Visual meshes are per-link GLBs (fairino_white body + fairino_orange ring,
-     merged from the source package's generated STLs); collision meshes are the
-     source package's lower-detail STLs. These are simplified generated meshes,
-     not tessellations of FAIRINO's official STEP geometry — they preserve link/
-     joint locations and overall scale but not exact castings/covers. -->
-<robot name="fairino_fr5_wml">
-  <link name="base_link">
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Fairino's own official FR5-WML URDF (temp/0828/FR5WML_urdf/FR5WML.urdf),
+     copied and adapted by 05_copy_official_urdf.py; see
+     temp/conversion_scripts/ for the generation pipeline and PLAN.md for
+     history. Link names lowercased, mesh paths rewritten to
+     arm/meshes/fr5wml/{visual,collision}/, and a zero-offset link_eef
+     flange appended. Do not hand-edit this file directly; re-run the
+     conversion pipeline against temp/0828/FR5WML_urdf/FR5WML.urdf instead. -->
+<robot
+  name="fr5wml">
+  <link
+    name="base_link">
+    <inertial>
+      <origin
+        xyz="-0.00017171 -0.00016075 0.041272"
+        rpy="0 0 0" />
+      <mass
+        value="4.3824" />
+      <inertia
+        ixx="0.010669"
+        ixy="2.9786E-05"
+        ixz="-2.7211E-05"
+        iyy="0.010667"
+        iyz="-2.5402E-05"
+        izz="0.017207" />
+    </inertial>
     <visual>
-      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
       <geometry>
-        <mesh filename="meshes/fr5wml/visual/base_link.glb"/>
+        <mesh
+          filename="meshes/fr5wml/visual/base_link.glb" />
       </geometry>
+      <material
+        name="">
+        <color
+          rgba="1 1 1 1" />
+      </material>
     </visual>
     <collision>
-      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
       <geometry>
-        <mesh filename="meshes/fr5wml/collision/base_link.stl"/>
+        <mesh
+          filename="meshes/fr5wml/collision/base_link.STL" />
       </geometry>
     </collision>
   </link>
-  <link name="link1">
+  <link
+    name="shoulder_link">
+    <inertial>
+      <origin
+        xyz="-0.00016 -0.02851 0.00416"
+        rpy="0 0 0" />
+      <mass
+        value="11.49" />
+      <inertia
+        ixx="0.04363659"
+        ixy="-0.00008398"
+        ixz="-0.00010772"
+        iyy="0.03443223"
+        iyz="0.00135296"
+        izz="0.0422736" />
+    </inertial>
     <visual>
-      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
       <geometry>
-        <mesh filename="meshes/fr5wml/visual/link1.glb"/>
+        <mesh
+          filename="meshes/fr5wml/visual/shoulder_link.glb" />
       </geometry>
+      <material
+        name="">
+        <color
+          rgba="1 1 1 1" />
+      </material>
     </visual>
     <collision>
-      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
       <geometry>
-        <mesh filename="meshes/fr5wml/collision/link1.stl"/>
+        <mesh
+          filename="meshes/fr5wml/collision/shoulder_link.STL" />
       </geometry>
     </collision>
   </link>
-  <joint name="j1" type="revolute">
-    <origin xyz="0 0 0" rpy="0 0 0"/>
-    <parent link="base_link"/>
-    <child link="link1"/>
-    <axis xyz="0 0 1"/>
-    <limit lower="-3.054326191" upper="3.054326191" effort="150" velocity="2.094395102"/>
+  <joint
+    name="j1"
+    type="revolute">
+    <origin
+      xyz="0 0 0"
+      rpy="0 0 0" />
+    <parent
+      link="base_link" />
+    <child
+      link="shoulder_link" />
+    <axis
+      xyz="0 0 1" />
+    <limit
+      lower="-3.0543"
+      upper="3.0543"
+      effort="635"
+      velocity="3.15" />
+    <calibration
+      rising="0"
+      falling="0" />
+    <dynamics
+      damping="0"
+      friction="0" />
+    <safety_controller
+      soft_upper="0"
+      soft_lower="0"
+      k_position="0"
+      k_velocity="0" />
   </joint>
-  <link name="frame1"/>
-  <joint name="j1_dh" type="fixed">
-    <origin xyz="0.180000 0 0.000000" rpy="1.570796327 0 0"/>
-    <parent link="link1"/>
-    <child link="frame1"/>
-  </joint>
-  <link name="link2">
+  <link
+    name="upperarm_link">
+    <inertial>
+      <origin
+        xyz="0.64259 0.00004 0.16562"
+        rpy="0 0 0" />
+      <mass
+        value="21.3" />
+      <inertia
+        ixx="0.06998418"
+        ixy="0.00107245"
+        ixz="-0.05317001"
+        iyy="3.59685655"
+        iyz="0.0000122"
+        izz="3.58314098" />
+    </inertial>
     <visual>
-      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
       <geometry>
-        <mesh filename="meshes/fr5wml/visual/link2.glb"/>
+        <mesh
+          filename="meshes/fr5wml/visual/upperarm_link.glb" />
       </geometry>
+      <material
+        name="">
+        <color
+          rgba="1 1 1 1" />
+      </material>
     </visual>
     <collision>
-      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
       <geometry>
-        <mesh filename="meshes/fr5wml/collision/link2.stl"/>
+        <mesh
+          filename="meshes/fr5wml/collision/upperarm_link.STL" />
       </geometry>
     </collision>
   </link>
-  <joint name="j2" type="revolute">
-    <origin xyz="0 0 0" rpy="0 0 0"/>
-    <parent link="frame1"/>
-    <child link="link2"/>
-    <axis xyz="0 0 1"/>
-    <limit lower="-4.625122518" upper="1.483529864" effort="150" velocity="2.094395102"/>
+  <joint
+    name="j2"
+    type="revolute">
+    <origin
+      xyz="0 0 0.18"
+      rpy="1.5708 0 0" />
+    <parent
+      link="shoulder_link" />
+    <child
+      link="upperarm_link" />
+    <axis
+      xyz="0 0 1" />
+    <limit
+      lower="-4.6251"
+      upper="1.4835"
+      effort="635"
+      velocity="3.15" />
+    <calibration
+      rising="0"
+      falling="0" />
+    <dynamics
+      damping="0"
+      friction="0" />
+    <safety_controller
+      soft_upper="0"
+      soft_lower="0"
+      k_position="0"
+      k_velocity="0" />
   </joint>
-  <link name="frame2"/>
-  <joint name="j2_dh" type="fixed">
-    <origin xyz="0.000000 0 -0.970000" rpy="0.000000000 0 0"/>
-    <parent link="link2"/>
-    <child link="frame2"/>
-  </joint>
-  <link name="link3">
+  <link
+    name="forearm_link">
+    <inertial>
+      <origin
+        xyz="0.32139 0.00016 0.05276"
+        rpy="0 0 0" />
+      <mass
+        value="4.61" />
+      <inertia
+        ixx="0.00791545"
+        ixy="0.00009431"
+        ixz="-0.00002323"
+        iyy="0.45358577"
+        iyz="0.00000681"
+        izz="0.45292129" />
+    </inertial>
     <visual>
-      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
       <geometry>
-        <mesh filename="meshes/fr5wml/visual/link3.glb"/>
+        <mesh
+          filename="meshes/fr5wml/visual/forearm_link.glb" />
       </geometry>
+      <material
+        name="">
+        <color
+          rgba="1 1 1 1" />
+      </material>
     </visual>
     <collision>
-      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
       <geometry>
-        <mesh filename="meshes/fr5wml/collision/link3.stl"/>
+        <mesh
+          filename="meshes/fr5wml/collision/forearm_link.STL" />
       </geometry>
     </collision>
   </link>
-  <joint name="j3" type="revolute">
-    <origin xyz="0 0 0" rpy="0 0 0"/>
-    <parent link="frame2"/>
-    <child link="link3"/>
-    <axis xyz="0 0 1"/>
-    <limit lower="-2.967059728" upper="2.967059728" effort="150" velocity="3.141592654"/>
+  <joint
+    name="j3"
+    type="revolute">
+    <origin
+      xyz="-0.97 0 0.045"
+      rpy="0 0 0" />
+    <parent
+      link="upperarm_link" />
+    <child
+      link="forearm_link" />
+    <axis
+      xyz="0 0 1" />
+    <limit
+      lower="-2.8274"
+      upper="2.8274"
+      effort="635"
+      velocity="3.15" />
+    <calibration
+      rising="0"
+      falling="0" />
+    <dynamics
+      damping="0"
+      friction="0" />
+    <safety_controller
+      soft_upper="0"
+      soft_lower="0"
+      k_position="0"
+      k_velocity="0" />
   </joint>
-  <link name="frame3"/>
-  <joint name="j3_dh" type="fixed">
-    <origin xyz="0.000000 0 -0.816000" rpy="0.000000000 0 0"/>
-    <parent link="link3"/>
-    <child link="frame3"/>
-  </joint>
-  <link name="link4">
+  <link
+    name="wrist1_link">
+    <inertial>
+      <origin
+        xyz="0.00021 -0.00306 0.01307"
+        rpy="0 0 0" />
+      <mass
+        value="1.66" />
+      <inertia
+        ixx="0.0023974"
+        ixy="-0.00001136"
+        ixz="-0.00000925"
+        iyy="0.00231599"
+        iyz="0.0000771"
+        izz="0.00179732" />
+    </inertial>
     <visual>
-      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
       <geometry>
-        <mesh filename="meshes/fr5wml/visual/link4.glb"/>
+        <mesh
+          filename="meshes/fr5wml/visual/wrist1_link.glb" />
       </geometry>
+      <material
+        name="">
+        <color
+          rgba="1 1 1 1" />
+      </material>
     </visual>
     <collision>
-      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
       <geometry>
-        <mesh filename="meshes/fr5wml/collision/link4.stl"/>
+        <mesh
+          filename="meshes/fr5wml/collision/wrist1_link.STL" />
       </geometry>
     </collision>
   </link>
-  <joint name="j4" type="revolute">
-    <origin xyz="0 0 0" rpy="0 0 0"/>
-    <parent link="frame3"/>
-    <child link="link4"/>
-    <axis xyz="0 0 1"/>
-    <limit lower="-4.625122518" upper="1.483529864" effort="28" velocity="3.141592654"/>
+  <joint
+    name="j4"
+    type="revolute">
+    <origin
+      xyz="-0.816 0 0"
+      rpy="0 0 0" />
+    <parent
+      link="forearm_link" />
+    <child
+      link="wrist1_link" />
+    <axis
+      xyz="0 0 1" />
+    <limit
+      lower="-4.6251"
+      upper="1.4835"
+      effort="110"
+      velocity="3.2" />
+    <calibration
+      rising="0"
+      falling="0" />
+    <dynamics
+      damping="0"
+      friction="0" />
+    <safety_controller
+      soft_upper="0"
+      soft_lower="0"
+      k_position="0"
+      k_velocity="0" />
   </joint>
-  <link name="frame4"/>
-  <joint name="j4_dh" type="fixed">
-    <origin xyz="0.159000 0 0.000000" rpy="1.570796327 0 0"/>
-    <parent link="link4"/>
-    <child link="frame4"/>
-  </joint>
-  <link name="link5">
+  <link
+    name="wrist2_link">
+    <inertial>
+      <origin
+        xyz="-0.00021 0.00306 0.01307"
+        rpy="0 0 0" />
+      <mass
+        value="1.66" />
+      <inertia
+        ixx="0.0023974"
+        ixy="-0.00001136"
+        ixz="0.00000925"
+        iyy="0.00231599"
+        iyz="-0.0000771"
+        izz="0.00179732" />
+    </inertial>
     <visual>
-      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
       <geometry>
-        <mesh filename="meshes/fr5wml/visual/link5.glb"/>
+        <mesh
+          filename="meshes/fr5wml/visual/wrist2_link.glb" />
       </geometry>
+      <material
+        name="">
+        <color
+          rgba="1 1 1 1" />
+      </material>
     </visual>
     <collision>
-      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
       <geometry>
-        <mesh filename="meshes/fr5wml/collision/link5.stl"/>
+        <mesh
+          filename="meshes/fr5wml/collision/wrist2_link.STL" />
       </geometry>
     </collision>
   </link>
-  <joint name="j5" type="revolute">
-    <origin xyz="0 0 0" rpy="0 0 0"/>
-    <parent link="frame4"/>
-    <child link="link5"/>
-    <axis xyz="0 0 1"/>
-    <limit lower="-3.054326191" upper="3.054326191" effort="28" velocity="3.141592654"/>
+  <joint
+    name="j5"
+    type="revolute">
+    <origin
+      xyz="0 0 0.114"
+      rpy="-1.5708 0 3.1416" />
+    <parent
+      link="wrist1_link" />
+    <child
+      link="wrist2_link" />
+    <axis
+      xyz="0 0 1" />
+    <limit
+      lower="-3.0543"
+      upper="3.0543"
+      effort="110"
+      velocity="3.2" />
+    <calibration
+      rising="0"
+      falling="0" />
+    <dynamics
+      damping="0"
+      friction="0" />
+    <safety_controller
+      soft_upper="0"
+      soft_lower="0"
+      k_position="0"
+      k_velocity="0" />
   </joint>
-  <link name="frame5"/>
-  <joint name="j5_dh" type="fixed">
-    <origin xyz="0.114000 0 0.000000" rpy="-1.570796327 0 0"/>
-    <parent link="link5"/>
-    <child link="frame5"/>
-  </joint>
-  <link name="link6">
+  <link
+    name="wrist3_link">
+    <inertial>
+      <origin
+        xyz="0.00145 0.00109 -0.01998"
+        rpy="0 0 0" />
+      <mass
+        value="0.36" />
+      <inertia
+        ixx="0.00023004"
+        ixy="0.00000109"
+        ixz="-0.00000007"
+        iyy="0.0002307"
+        iyz="0.00000018"
+        izz="0.00036173" />
+    </inertial>
     <visual>
-      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
       <geometry>
-        <mesh filename="meshes/fr5wml/visual/link6.glb"/>
+        <mesh
+          filename="meshes/fr5wml/visual/wrist3_link.glb" />
       </geometry>
+      <material
+        name="">
+        <color
+          rgba="1 1 1 1" />
+      </material>
     </visual>
     <collision>
-      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
       <geometry>
-        <mesh filename="meshes/fr5wml/collision/link6.stl"/>
+        <mesh
+          filename="meshes/fr5wml/collision/wrist3_link.STL" />
       </geometry>
     </collision>
   </link>
-  <joint name="j6" type="revolute">
-    <origin xyz="0 0 0" rpy="0 0 0"/>
-    <parent link="frame5"/>
-    <child link="link6"/>
-    <axis xyz="0 0 1"/>
-    <limit lower="-6.283185307" upper="6.283185307" effort="28" velocity="3.141592654"/>
+  <joint
+    name="j6"
+    type="revolute">
+    <origin
+      xyz="0 0 0.114"
+      rpy="-1.5708 0 -3.1416" />
+    <parent
+      link="wrist2_link" />
+    <child
+      link="wrist3_link" />
+    <axis
+      xyz="0 0 1" />
+    <limit
+      lower="-6.2831"
+      upper="6.2831"
+      effort="110"
+      velocity="3.2" />
+    <calibration
+      rising="0"
+      falling="0" />
+    <dynamics
+      damping="0"
+      friction="0" />
+    <safety_controller
+      soft_upper="0"
+      soft_lower="0"
+      k_position="0"
+      k_velocity="0" />
   </joint>
-  <link name="tool0"/>
-  <joint name="j6_dh" type="fixed">
-    <origin xyz="0.160000 0 0.000000" rpy="0.000000000 0 0"/>
-    <parent link="link6"/>
-    <child link="tool0"/>
+  <link
+    name="link_eef" />
+  <joint
+    name="joint_eef"
+    type="fixed">
+    <origin
+      xyz="0 0 0.106"
+      rpy="0 0 0" />
+    <parent
+      link="wrist3_link" />
+    <child
+      link="link_eef" />
   </joint>
 </robot>

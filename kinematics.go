@@ -47,8 +47,8 @@ type modelAssets struct {
 // matter of adding its URDF/JSON/meshes and one entry here.
 var modelRegistry = map[string]modelAssets{
 	ModelFR5WML: {
-		// Generated from FAIRINO's published FR5-WML DH table; meshes are
-		// simplified generated geometry — see arm/fr5wml_SOURCES.md.
+		// FAIRINO's official FR5-WML URDF with real CAD meshes, adapted for
+		// this module — see arm/fr5wml_SOURCES.md.
 		urdfRelPath:        "arm/fr5wml.urdf",
 		kinematicsJSON:     fr5wmlKinematicsJSON,
 		meshVisualDir:      "arm/meshes/fr5wml/visual",
