@@ -243,6 +243,33 @@ func readCmdFrame(r *bufio.Reader) ([]byte, error) {
 }
 
 // encodeCmdFrame builds one request frame per manual Table 1-1-1.
+// getSoftwareVersion queries the controller's GetSoftwareVersion (CMD_ID 905)
+// and returns its three comma-separated fields. Used for model auto-detection
+// (see module.go's detectModel); robotModel is the only field callers act on.
+func (c *commandClient) getSoftwareVersion(ctx context.Context) (robotModel, webVersion, controllerVersion string, err error) {
+	data, err := c.send(ctx, cmdIDGetSoftwareVersion, "GetSoftwareVersion()")
+	if err != nil {
+		return "", "", "", err
+	}
+	robotModel, webVersion, controllerVersion = parseSoftwareVersion(data)
+	return robotModel, webVersion, controllerVersion, nil
+}
+
+// parseSoftwareVersion splits GetSoftwareVersion's response DATA
+// ("<robotModel>,<webVersion>,<controllerVersion>") into its fields, tolerating
+// a short/oversized field count (missing fields come back empty). Verified
+// against an FR5: "FR5-V1-002(V6.0),v3.9.4,V3.9.22-QX".
+func parseSoftwareVersion(data string) (robotModel, webVersion, controllerVersion string) {
+	parts := strings.SplitN(strings.TrimSpace(data), ",", 3)
+	get := func(i int) string {
+		if i < len(parts) {
+			return strings.TrimSpace(parts[i])
+		}
+		return ""
+	}
+	return get(0), get(1), get(2)
+}
+
 func encodeCmdFrame(cnt, cmdID int, data string) string {
 	return cmdFrameStart + cmdFieldSep + strconv.Itoa(cnt) + cmdFieldSep +
 		strconv.Itoa(cmdID) + cmdFieldSep + strconv.Itoa(len(data)) + cmdFieldSep +
