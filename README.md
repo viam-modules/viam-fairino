@@ -39,6 +39,26 @@ system`. This is a robot-config change, not something the module supplies on
 its own — `MoveToJointPositions`/`MoveThroughJointPositions`/`GoToInputs`
 don't need it, only `MoveToPosition`.
 
+## Waypoint blending (`blend_time_ms`)
+
+By default, a multi-waypoint move (`MoveThroughJointPositions`, and
+therefore `GoToInputs`/`MoveToPosition` too, since both delegate to it)
+decelerates to a full stop at every waypoint before starting the next —
+this can look jerky. Setting `blend_time_ms` (1-500) makes every waypoint
+but the last blend into the next instead of stopping, using the
+controller's own motion queue. The last waypoint always stops, so the overall call
+still only returns once the arm is physically at rest at its final target.
+
+**This applies uniformly, including to IK-planned trajectories.** There is
+no separate code path for `GoToInputs`/`MoveToPosition` — if `blend_time_ms`
+is set, it blends through those waypoints too. For a motion-service plan
+that was computed to be collision-aware, blending can "cut the corner" at
+an intermediate waypoint instead of passing through it exactly, which may
+not preserve the clearances the plan was computed for. If that matters for
+your workcell, leave `blend_time_ms` at 0 for motion-service-driven moves,
+or otherwise account for the corner-cutting in how the plan's waypoints are
+spaced.
+
 ## Models
 
 This module provides the following model(s):
@@ -61,6 +81,7 @@ This module provides the following model(s):
 | `use_urdf` | bool | no | Use the on-disk URDF (`arm/fr5wml.urdf`) as the kinematics source instead of the default embedded JSON. Requires `VIAM_MODULE_ROOT` to be set (true for a normal deployment). JSON is the default because it's the only one the Viam app's joint-limit sliders currently parse correctly. |
 | `mesh_decimation_ratios` | []float | no | Only used when `use_urdf` is true; per-collision-mesh decimation ratios (document order). |
 | `motion` | string | no | Name of the `motion.Service` `MoveToPosition` delegates to. Defaults to this robot's `"builtin"` motion service if available (optional dependency); naming one explicitly makes it a hard dependency instead. See the Cartesian motion section above. |
+| `blend_time_ms` | int | no | `MoveJ`'s non-blocking `blendT` field, 0-500. Default 0 (disabled): every waypoint decelerates to a full stop before the next, the original behavior. A nonzero value blends through every waypoint but the last in a multi-waypoint move (`MoveThroughJointPositions`, and therefore `GoToInputs`/`MoveToPosition` too, since both delegate to it) instead of stopping at each — see the blending caveat below. |
 
 The controller's ports are fixed by firmware (status 8083, commands 8080) and
 are not configurable.
@@ -74,7 +95,7 @@ are not configurable.
 | `Status` | ✅ connection health + decoded controller state |
 | `DoCommand` | ✅ `{"command": "status"}` (see below) |
 | `MoveToJointPositions` | ✅ single blocking `MoveJ` |
-| `MoveThroughJointPositions` | ✅ loops `MoveToJointPositions`' underlying mechanics per waypoint |
+| `MoveThroughJointPositions` | ✅ loops `MoveToJointPositions`' underlying mechanics per waypoint; blends through intermediate waypoints when `blend_time_ms` is set (see below) |
 | `MoveToPosition` | ✅ via a `motion.Service` (see the "frame" config requirement above) — IK-solved, self-collision-checked joint trajectory, never a direct Cartesian command to the controller |
 | `GoToInputs` | ✅ delegates to `MoveThroughJointPositions` (this is what the motion service's plan executor actually calls) |
 | `Kinematics` / `Geometries` / `Get3DModels` | ✅ real kinematic model (see the mesh/mass-inertia accuracy caveat above) |

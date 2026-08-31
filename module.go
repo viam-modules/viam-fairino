@@ -5,8 +5,9 @@
 // IsMoving, Status, DoCommand status dump). A commandClient (command.go)
 // sends motion commands on the controller's 8080 command port, via the
 // shared moveToJointPositionsOnce primitive: MoveToJointPositions calls it
-// directly for a single target, MoveThroughJointPositions loops it for a
-// multi-waypoint sequence, and GoToInputs delegates to
+// directly for a single blocking target, MoveThroughJointPositions loops it
+// for a multi-waypoint sequence (blending through intermediate waypoints
+// when Config.BlendTimeMs is nonzero), and GoToInputs delegates to
 // MoveThroughJointPositions. MoveToPosition (Cartesian moves) delegates to a
 // motion.Service (this robot's default "builtin" service unless Config.Motion
 // names another one) rather than planning IK itself — mirrors
@@ -99,6 +100,14 @@ type Config struct {
 	// service explicitly makes it a hard dependency instead: construction
 	// fails if that named service isn't available.
 	Motion string `json:"motion,omitempty"`
+
+	// BlendTimeMs is MoveJ's non-blocking "blendT" (manual Table 2-1), used
+	// for every waypoint but the last in a multi-waypoint move
+	// (MoveThroughJointPositions, and GoToInputs/MoveToPosition which
+	// delegate to it). Zero (default) disables blending: every waypoint
+	// stops fully, matching this module's pre-blending behavior. Range
+	// [0,500]; see README for the IK "cut corner" caveat.
+	BlendTimeMs int `json:"blend_time_ms,omitempty"`
 }
 
 // Validate ensures all parts of the config are valid. Host is optional (it
@@ -120,6 +129,9 @@ func (cfg *Config) Validate(path string) ([]string, []string, error) {
 	}
 	if v := cfg.JointSpeedPercent; v < 0 || v > 100 {
 		return nil, nil, fmt.Errorf("%s: joint_speed_percent must be between 1 and 100, got %d", path, v)
+	}
+	if v := cfg.BlendTimeMs; v < 0 || v > 500 {
+		return nil, nil, fmt.Errorf("%s: blend_time_ms must be between 0 and 500, got %d", path, v)
 	}
 
 	var deps, optionalDeps []string
@@ -385,37 +397,46 @@ const (
 	jointToleranceDeg = 0.5
 )
 
-// MoveToJointPositions moves the arm's joints to the given positions via a
-// single blocking MoveJ() (manual §2.1). See moveToJointPositionsOnce for
-// the actual mechanics — this just wraps it with this module's own
-// single-operation bookkeeping, since it's a standalone public entry point.
+// MoveToJointPositions moves the arm's joints to a single target via a
+// blocking MoveJ() (manual §2.1); always blendTBlocking — blending only
+// applies to multi-waypoint moves (see MoveThroughJointPositions).
 func (s *viamFairinoFairino) MoveToJointPositions(ctx context.Context, positions []referenceframe.Input, extra map[string]interface{}) error {
+	start := time.Now()
+	s.logger.Infow("MoveToJointPositions: called", "positions_rad", positions)
 	ctx, done := s.opMgr.New(ctx)
 	defer done()
-	return s.moveToJointPositionsOnce(ctx, positions)
+	err := s.moveToJointPositionsOnce(ctx, positions, blendTBlocking)
+	s.logger.Infow("MoveToJointPositions: done", "elapsed", time.Since(start), "err", err)
+	return err
 }
 
-// moveToJointPositionsOnce sends a single blocking MoveJ() (manual §2.1) and
-// waits for completion. It returns once the controller reports the move
-// complete (statusFrame.MotionDone) and the joints are within tolerance of
-// the target, or once ctx is cancelled — in which case it sends STOP before
-// returning ctx.Err(), mirroring viam-dobot's cancellation handling.
+// blendTBlocking is moveJParams.BlendT's "-1": decelerate to a full stop at
+// this waypoint before any next queued motion.
+const blendTBlocking = -1
+
+// moveToJointPositionsOnce sends one MoveJ() (manual §2.1) with the given
+// blendT. blendTBlocking waits for physical completion (statusFrame.MotionDone,
+// joints within tolerance), sending STOP and returning ctx.Err() on
+// cancellation. Any positive blendT (a blend — see Config.BlendTimeMs)
+// returns as soon as the command is acked; the caller must send the next
+// waypoint immediately so the controller's own motion queue blends between
+// them. blendT == 0 is rejected: a 0ms blend is indistinguishable from a
+// full stop, so it's never a meaningful value to send.
 //
-// Shared by MoveToJointPositions (a single public move) and
-// MoveThroughJointPositions (a caller-driven multi-waypoint sequence — e.g.
-// GoToInputs's IK-planned trajectory for MoveToPosition, via the motion
-// service). Deliberately does NOT call s.opMgr.New itself: operation.SingleOperationManager
-// cancels the previous operation the moment a new one starts, so if this
-// were called per-waypoint from inside a loop that's already under one
-// opMgr operation, each waypoint would immediately cancel the one before it.
-// The public entry points (MoveToJointPositions, MoveToPosition) own the
-// single opMgr.New call for the whole move; this is the shared mechanics
-// underneath, same split as viam-dobot's moveJoint/MoveToJointPositions.
-func (s *viamFairinoFairino) moveToJointPositionsOnce(ctx context.Context, positions []referenceframe.Input) error {
+// Shared by MoveToJointPositions (always blendTBlocking) and
+// MoveThroughJointPositions (chooses blendT per waypoint). Deliberately
+// doesn't call s.opMgr.New itself — operation.SingleOperationManager would
+// cancel the previous operation on each new waypoint if this were called
+// from inside a loop already under one opMgr operation. The public entry
+// points own the single opMgr.New call for the whole move.
+func (s *viamFairinoFairino) moveToJointPositionsOnce(ctx context.Context, positions []referenceframe.Input, blendT float64) error {
+	if blendT == 0 {
+		return errors.New("moveToJointPositionsOnce: blendT must not be 0 (0ms blend is no different from a full stop)")
+	}
 	moveStart := time.Now()
 	// TEMP verbose bring-up logging — pare back to Debug once MoveJ is
 	// confirmed working end-to-end on hardware.
-	s.logger.Infow("moveToJointPositionsOnce: called", "positions_rad", positions)
+	s.logger.Infow("moveToJointPositionsOnce: called", "positions_rad", positions, "blend_t", blendT)
 
 	var targetDeg [6]float64
 	for i := 0; i < 6; i++ {
@@ -424,13 +445,9 @@ func (s *viamFairinoFairino) moveToJointPositionsOnce(ctx context.Context, posit
 	s.logger.Infow("moveToJointPositionsOnce: target", "target_deg", targetDeg)
 
 	// desc_pos: see moveJParams.Pose's doc comment in command.go — the
-	// controller validates this against the joint target, so it must be the
-	// real forward-kinematics pose for targetDeg, not a placeholder. Fetched
-	// from the controller itself (GetForwardKin) rather than computed from
-	// s.model — this is proven working on hardware, and MoveToPosition
-	// (which now has a real kinematic model available) still routes through
-	// this same path via MoveThroughJointPositions, so there was no reason
-	// to change it.
+	// controller validates this against the joint target, so it must be
+	// the real forward-kinematics pose for targetDeg, fetched from the
+	// controller itself (GetForwardKin), not a placeholder.
 	targetPose, err := s.cmd.getForwardKin(ctx, targetDeg)
 	if err != nil {
 		s.logger.Infow("moveToJointPositionsOnce: GetForwardKin failed", "err", err)
@@ -446,12 +463,20 @@ func (s *viamFairinoFairino) moveToJointPositionsOnce(ctx context.Context, posit
 		SpeedPercent: float64(orDefaultInt(s.cfg.JointSpeedPercent, defaultJointSpeedPercent)),
 		AccelPercent: 0, // reserved/non-functional on the controller — see moveJParams.AccelPercent
 		OverridePct:  100,
-		BlendT:       -1, // block at this single target; see moveJParams.BlendT
+		BlendT:       blendT,
 	}
 
 	if err := s.cmd.moveJ(ctx, params); err != nil {
 		s.logger.Infow("moveToJointPositionsOnce: MoveJ ack failed", "elapsed", time.Since(moveStart), "err", err)
 		return fmt.Errorf("MoveJ: %w", err)
+	}
+
+	if blendT > 0 {
+		// Blend: queued, blending into whatever's sent next — nothing to
+		// wait for. blendT > 0 rather than != blendTBlocking as a
+		// precaution: any non-positive value falls through to waiting.
+		s.logger.Infow("moveToJointPositionsOnce: MoveJ acknowledged (blend), not waiting for completion", "elapsed", time.Since(moveStart))
+		return nil
 	}
 	s.logger.Infow("moveToJointPositionsOnce: MoveJ acknowledged, waiting for motion to complete", "elapsed", time.Since(moveStart))
 
@@ -614,8 +639,12 @@ func (s *viamFairinoFairino) EndPosition(ctx context.Context, extra map[string]i
 // actually calls (framesystem.InputEnabled), so GoToInputs can't be left
 // stubbed once this depends on a motion service.
 func (s *viamFairinoFairino) MoveToPosition(ctx context.Context, pose spatialmath.Pose, extra map[string]interface{}) error {
+	start := time.Now()
+	s.logger.Infow("MoveToPosition: called", "pose", pose)
 	if s.motion == nil {
-		return errors.New("fairino cannot do MoveToPosition without a motion service available (see MoveToPosition's doc comment)")
+		err := errors.New("fairino cannot do MoveToPosition without a motion service available (see MoveToPosition's doc comment)")
+		s.logger.Infow("MoveToPosition: no motion service configured", "err", err)
+		return err
 	}
 	ctx, done := s.opMgr.New(ctx)
 	defer done()
@@ -623,6 +652,7 @@ func (s *viamFairinoFairino) MoveToPosition(ctx context.Context, pose spatialmat
 		ComponentName: s.Name().Name,
 		Destination:   referenceframe.NewPoseInFrame(fmt.Sprintf("%s_origin", s.Name().Name), pose),
 	})
+	s.logger.Infow("MoveToPosition: done", "elapsed", time.Since(start), "err", err)
 	return err
 }
 
@@ -630,19 +660,38 @@ func (s *viamFairinoFairino) MoveToPosition(ctx context.Context, pose spatialmat
 // positions in order, via moveToJointPositionsOnce per waypoint. Doesn't
 // call s.opMgr.New itself — see that method's doc comment for why — so a
 // direct caller other than MoveToPosition or GoToInputs (which wrap one
-// operation around the whole multi-waypoint sequence) would currently run
-// without single-operation protection; matches viam-dobot's own
-// MoveThroughJointPositions, which has the same property.
+// operation around the whole sequence) runs without single-operation
+// protection.
 //
 // options (MaxVelRads/MaxAccRads) isn't consumed: this module's command
-// protocol only has a single fixed per-config speed (Config.JointSpeedPercent),
-// not a per-call override, unlike viam-dobot's VelJ/AccJ mapping.
+// protocol only has a single fixed per-config speed (Config.JointSpeedPercent).
+//
+// Blending: with Config.BlendTimeMs nonzero and more than one waypoint,
+// every waypoint but the last blends (non-blocking, no completion wait);
+// the last always blocks, so this still only returns once the arm is at
+// rest at the final target. Applies equally to GoToInputs/MoveToPosition's
+// IK-planned trajectories, since they delegate here too — see the README
+// for the resulting "cut corner" caveat.
+//
+// TODO(later, once arm.Stop() is implemented — see errPhase2): a context
+// cancelled during a blended (non-blocking) waypoint doesn't currently
+// trigger a real STOP the way it does for a blocking waypoint.
 func (s *viamFairinoFairino) MoveThroughJointPositions(ctx context.Context, positions [][]referenceframe.Input, options *arm.MoveOptions, extra map[string]interface{}) error {
+	start := time.Now()
+	s.logger.Infow("MoveThroughJointPositions: called", "num_waypoints", len(positions), "blend_time_ms", s.cfg.BlendTimeMs)
 	for i, goal := range positions {
-		if err := s.moveToJointPositionsOnce(ctx, goal); err != nil {
+		last := i == len(positions)-1
+		blendT := float64(blendTBlocking)
+		if s.cfg.BlendTimeMs > 0 && !last {
+			blendT = float64(s.cfg.BlendTimeMs)
+		}
+		s.logger.Infow("MoveThroughJointPositions: sending waypoint", "waypoint", i+1, "of", len(positions), "last", last, "blend_t", blendT)
+		if err := s.moveToJointPositionsOnce(ctx, goal, blendT); err != nil {
+			s.logger.Infow("MoveThroughJointPositions: waypoint failed", "waypoint", i+1, "of", len(positions), "elapsed", time.Since(start), "err", err)
 			return fmt.Errorf("waypoint %d/%d: %w", i+1, len(positions), err)
 		}
 	}
+	s.logger.Infow("MoveThroughJointPositions: done", "num_waypoints", len(positions), "elapsed", time.Since(start))
 	return nil
 }
 
@@ -653,10 +702,12 @@ func (s *viamFairinoFairino) MoveThroughJointPositions(ctx context.Context, posi
 // couldn't stay stubbed once MoveToPosition depends on a motion service.
 // Mirrors viam-ufactory-xarm's GoToInputs exactly (arm/xarm.go).
 func (s *viamFairinoFairino) GoToInputs(ctx context.Context, inputSteps ...[]referenceframe.Input) error {
+	s.logger.Infow("GoToInputs: called", "num_steps", len(inputSteps))
 	return s.MoveThroughJointPositions(ctx, inputSteps, nil, nil)
 }
 
 func (s *viamFairinoFairino) Stop(ctx context.Context, extra map[string]interface{}) error {
+	s.logger.Infow("Stop: called, but not implemented — returning errPhase2", "err", errPhase2)
 	return errPhase2
 }
 
