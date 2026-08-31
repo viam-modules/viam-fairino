@@ -3,13 +3,23 @@
 // A statusClient (status.go) reads the controller's 8083 status broadcast
 // and backs the read-only arm.Arm methods (JointPositions, CurrentInputs,
 // IsMoving, Status, DoCommand status dump). A commandClient (command.go)
-// sends motion commands on the controller's 8080 command port; so far only
-// MoveToJointPositions uses it. Kinematics returns a joint-limits-only model
-// (kinematics.go) — just enough for arm.CheckDesiredJointPositions to reject
-// out-of-range targets, not a real link chain. Everything else that would
-// need either the command port (Cartesian/multi-waypoint motion, Stop) or a
-// full link/geometry model (EndPosition, Geometries, Get3DModels) is still
-// stubbed.
+// sends motion commands on the controller's 8080 command port, via the
+// shared moveToJointPositionsOnce primitive: MoveToJointPositions calls it
+// directly for a single target, MoveThroughJointPositions loops it for a
+// multi-waypoint sequence, and GoToInputs delegates to
+// MoveThroughJointPositions. MoveToPosition (Cartesian moves) delegates to a
+// motion.Service (this robot's default "builtin" service unless Config.Motion
+// names another one) rather than planning IK itself — mirrors
+// viam-ufactory-xarm's MoveToPosition, not viam-dobot's self-contained
+// armplanning.MoveArm, specifically to keep the nlopt/cgo dependency that
+// motion planning needs out of this module's own binary (see
+// MoveToPosition's doc comment for what this requires in the robot's JSON
+// config). Kinematics returns a real link/geometry model (kinematics.go),
+// parsed from the URDF shipped in the module tarball (arm/fr5wml.urdf — see
+// PLAN.md STATUS for where this URDF actually came from); Geometries and
+// Get3DModels both use that same model and its bundled meshes. EndPosition
+// is implemented via forward kinematics (see its own doc comment for the
+// still-open design question). Stop is still stubbed.
 //
 // The wire protocols use degrees and millimeters (constants.go/status.go/
 // command.go); all conversion to radians/SI happens in this file, at the
@@ -20,6 +30,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
+	"sync"
 	"time"
 
 	commonpb "go.viam.com/api/common/v1"
@@ -28,11 +42,12 @@ import (
 	"go.viam.com/rdk/operation"
 	"go.viam.com/rdk/referenceframe"
 	"go.viam.com/rdk/resource"
+	"go.viam.com/rdk/services/motion"
 	"go.viam.com/rdk/spatialmath"
 	rdkutils "go.viam.com/rdk/utils"
 )
 
-var Fairino = resource.NewModel("3a94d2f9082b44ad8569a9d8a1330050", "viam-fairino", "fairino")
+var Fairino = resource.NewModel("viam-soleng", "viam-fairino", "fairino")
 
 func init() {
 	resource.RegisterComponent(arm.API, Fairino,
@@ -60,11 +75,40 @@ type Config struct {
 	// default (vel=20.0) — not otherwise documented as a controller-side
 	// default, so this module picks the same value the vendor SDK does.
 	JointSpeedPercent int `json:"joint_speed_percent,omitempty"`
+
+	// UseURDF selects the on-disk URDF (arm/fr5wml.urdf) as the kinematics
+	// source instead of the default embedded JSON (kinematics.go). The URDF
+	// path requires VIAM_MODULE_ROOT to be set (true for a normally-deployed
+	// module; not automatically true for e.g. bare `go test`). See PLAN.md
+	// Step 10 for why JSON is the default: among other things, it's the only
+	// one the Viam app's joint-limit sliders currently parse correctly.
+	UseURDF bool `json:"use_urdf,omitempty"`
+
+	// MeshDecimationRatios is only used when UseURDF is true; forwarded
+	// as-is to referenceframe.ParseModelXMLFile. nil means no decimation.
+	// See that function's doc comment for the per-collision-mesh ordering
+	// it expects (document order: base_link, then the 6 links in URDF
+	// joint order — not one entry per joint).
+	MeshDecimationRatios []float64 `json:"mesh_decimation_ratios,omitempty"`
+
+	// Motion names the motion.Service MoveToPosition delegates to (see that
+	// method's doc comment). Empty (the default) means "use this robot's
+	// default 'builtin' motion service if one is available" — an optional
+	// dependency, so the arm still constructs successfully even if it isn't
+	// (MoveToPosition then just errors when actually called). Naming a
+	// service explicitly makes it a hard dependency instead: construction
+	// fails if that named service isn't available.
+	Motion string `json:"motion,omitempty"`
 }
 
 // Validate ensures all parts of the config are valid. Host is optional (it
 // has a default) and any non-empty value is accepted as-is — a bad address
-// surfaces as a dial error from the status client.
+// surfaces as a dial error from the status client. Also declares Motion (see
+// its doc comment) as a dependency — required if named explicitly, optional
+// (defaulting to "builtin") otherwise — mirroring viam-ufactory-xarm's
+// Validate exactly; this is what actually gets the motion service into the
+// resource.Dependencies map handed to NewFairino, not just it existing on
+// the robot.
 func (cfg *Config) Validate(path string) ([]string, []string, error) {
 	for name, v := range map[string]int{
 		"tool_num":      cfg.ToolNum,
@@ -77,7 +121,14 @@ func (cfg *Config) Validate(path string) ([]string, []string, error) {
 	if v := cfg.JointSpeedPercent; v < 0 || v > 100 {
 		return nil, nil, fmt.Errorf("%s: joint_speed_percent must be between 1 and 100, got %d", path, v)
 	}
-	return nil, nil, nil
+
+	var deps, optionalDeps []string
+	if cfg.Motion != "" {
+		deps = append(deps, motion.Named(cfg.Motion).String())
+	} else {
+		optionalDeps = append(optionalDeps, motion.Named("builtin").String())
+	}
+	return deps, optionalDeps, nil
 }
 
 // defaultJointSpeedPercent is used when Config.JointSpeedPercent is unset
@@ -90,6 +141,18 @@ type viamFairinoFairino struct {
 	name   resource.Name
 	logger logging.Logger
 	cfg    *Config
+
+	// model is the FR5-WML's kinematic model, built once at construction
+	// time by kinematics.go's makeModelFrame.
+	model referenceframe.Model
+
+	// motion is the motion.Service MoveToPosition delegates to; nil if none
+	// was available (see Config.Motion's doc comment and MoveToPosition's).
+	motion motion.Service
+
+	// meshMu guards meshCache — see Get3DModels.
+	meshMu    sync.Mutex
+	meshCache map[string]*commonpb.Mesh
 
 	status *statusClient
 	cmd    *commandClient
@@ -116,10 +179,36 @@ func NewFairino(ctx context.Context, deps resource.Dependencies, name resource.N
 		host = defaultHost
 	}
 
+	model, err := makeModelFrame(name.Name, conf.UseURDF, conf.MeshDecimationRatios)
+	if err != nil {
+		cancelFunc()
+		return nil, err
+	}
+
+	// Resolve the motion service MoveToPosition delegates to (see its doc
+	// comment). An explicitly-named service is a hard dependency — fail
+	// construction if it's missing. The implicit "builtin" default is
+	// optional: log and continue with motionSvc == nil rather than fail,
+	// since a fairino arm with no Cartesian-motion needs shouldn't refuse to
+	// construct over it — mirrors viam-ufactory-xarm's NewXArm exactly.
+	var motionSvc motion.Service
+	if conf.Motion != "" {
+		motionSvc, err = motion.FromProvider(deps, conf.Motion)
+		if err != nil {
+			cancelFunc()
+			return nil, fmt.Errorf("motion service %q: %w", conf.Motion, err)
+		}
+	} else if motionSvc, err = motion.FromProvider(deps, "builtin"); err != nil {
+		logger.CDebugw(ctx, "no default motion service available; MoveToPosition will be unavailable", "err", err)
+		motionSvc = nil
+	}
+
 	s := &viamFairinoFairino{
 		name:       name,
 		logger:     logger,
 		cfg:        conf,
+		model:      model,
+		motion:     motionSvc,
 		status:     newStatusClient(host, statusPort, logger),
 		cmd:        newCommandClient(host, commandPort, logger),
 		opMgr:      operation.NewSingleOperationManager(),
@@ -297,37 +386,57 @@ const (
 )
 
 // MoveToJointPositions moves the arm's joints to the given positions via a
-// single blocking MoveJ() (manual §2.1). It returns once the controller
-// reports the move complete (statusFrame.MotionDone) and the joints are
-// within tolerance of the target, or once ctx is cancelled — in which case
-// it sends STOP before returning ctx.Err(), mirroring viam-dobot's
-// cancellation handling.
+// single blocking MoveJ() (manual §2.1). See moveToJointPositionsOnce for
+// the actual mechanics — this just wraps it with this module's own
+// single-operation bookkeeping, since it's a standalone public entry point.
 func (s *viamFairinoFairino) MoveToJointPositions(ctx context.Context, positions []referenceframe.Input, extra map[string]interface{}) error {
+	ctx, done := s.opMgr.New(ctx)
+	defer done()
+	return s.moveToJointPositionsOnce(ctx, positions)
+}
+
+// moveToJointPositionsOnce sends a single blocking MoveJ() (manual §2.1) and
+// waits for completion. It returns once the controller reports the move
+// complete (statusFrame.MotionDone) and the joints are within tolerance of
+// the target, or once ctx is cancelled — in which case it sends STOP before
+// returning ctx.Err(), mirroring viam-dobot's cancellation handling.
+//
+// Shared by MoveToJointPositions (a single public move) and
+// MoveThroughJointPositions (a caller-driven multi-waypoint sequence — e.g.
+// GoToInputs's IK-planned trajectory for MoveToPosition, via the motion
+// service). Deliberately does NOT call s.opMgr.New itself: operation.SingleOperationManager
+// cancels the previous operation the moment a new one starts, so if this
+// were called per-waypoint from inside a loop that's already under one
+// opMgr operation, each waypoint would immediately cancel the one before it.
+// The public entry points (MoveToJointPositions, MoveToPosition) own the
+// single opMgr.New call for the whole move; this is the shared mechanics
+// underneath, same split as viam-dobot's moveJoint/MoveToJointPositions.
+func (s *viamFairinoFairino) moveToJointPositionsOnce(ctx context.Context, positions []referenceframe.Input) error {
 	moveStart := time.Now()
 	// TEMP verbose bring-up logging — pare back to Debug once MoveJ is
 	// confirmed working end-to-end on hardware.
-	s.logger.Infow("MoveToJointPositions: called", "positions_rad", positions, "extra", extra)
-
-	ctx, done := s.opMgr.New(ctx)
-	defer done()
+	s.logger.Infow("moveToJointPositionsOnce: called", "positions_rad", positions)
 
 	var targetDeg [6]float64
 	for i := 0; i < 6; i++ {
 		targetDeg[i] = rdkutils.RadToDeg(positions[i])
 	}
-	s.logger.Infow("MoveToJointPositions: target", "target_deg", targetDeg)
+	s.logger.Infow("moveToJointPositionsOnce: target", "target_deg", targetDeg)
 
 	// desc_pos: see moveJParams.Pose's doc comment in command.go — the
 	// controller validates this against the joint target, so it must be the
 	// real forward-kinematics pose for targetDeg, not a placeholder. Fetched
-	// from the controller itself (GetForwardKin) rather than computed
-	// locally, since this module has no kinematic model yet.
+	// from the controller itself (GetForwardKin) rather than computed from
+	// s.model — this is proven working on hardware, and MoveToPosition
+	// (which now has a real kinematic model available) still routes through
+	// this same path via MoveThroughJointPositions, so there was no reason
+	// to change it.
 	targetPose, err := s.cmd.getForwardKin(ctx, targetDeg)
 	if err != nil {
-		s.logger.Infow("MoveToJointPositions: GetForwardKin failed", "err", err)
+		s.logger.Infow("moveToJointPositionsOnce: GetForwardKin failed", "err", err)
 		return fmt.Errorf("GetForwardKin: %w", err)
 	}
-	s.logger.Infow("MoveToJointPositions: forward kinematics for target", "target_deg", targetDeg, "target_pose", targetPose)
+	s.logger.Infow("moveToJointPositionsOnce: forward kinematics for target", "target_deg", targetDeg, "target_pose", targetPose)
 
 	params := moveJParams{
 		Joints:       targetDeg,
@@ -341,13 +450,13 @@ func (s *viamFairinoFairino) MoveToJointPositions(ctx context.Context, positions
 	}
 
 	if err := s.cmd.moveJ(ctx, params); err != nil {
-		s.logger.Infow("MoveToJointPositions: MoveJ ack failed", "elapsed", time.Since(moveStart), "err", err)
+		s.logger.Infow("moveToJointPositionsOnce: MoveJ ack failed", "elapsed", time.Since(moveStart), "err", err)
 		return fmt.Errorf("MoveJ: %w", err)
 	}
-	s.logger.Infow("MoveToJointPositions: MoveJ acknowledged, waiting for motion to complete", "elapsed", time.Since(moveStart))
+	s.logger.Infow("moveToJointPositionsOnce: MoveJ acknowledged, waiting for motion to complete", "elapsed", time.Since(moveStart))
 
 	err = s.waitForMotionComplete(ctx, targetDeg)
-	s.logger.Infow("MoveToJointPositions: done", "elapsed", time.Since(moveStart), "err", err)
+	s.logger.Infow("moveToJointPositionsOnce: done", "elapsed", time.Since(moveStart), "err", err)
 	return err
 }
 
@@ -455,61 +564,239 @@ func (s *viamFairinoFairino) Close(context.Context) error {
 	return nil
 }
 
-// ---------- stubbed methods (Phases 2–3, see PLAN.md) ----------
+// ---------- stubbed methods ----------
 
-// errPhase2 marks methods that need the command port (8080) client.
-// MoveToJointPositions (below) is the first exception — everything else
-// that needs the command port is still stubbed.
+// errPhase2 marks Stop, the one remaining stubbed method. Everything else
+// that needs the command port (MoveToJointPositions, MoveThroughJointPositions,
+// MoveToPosition, GoToInputs) is implemented.
 var errPhase2 = errors.New("not implemented yet; motion via the command port is planned but not yet built for this method")
 
-// errPhase3 marks methods that need a full FR5-WML link/geometry model
-// (URDF or equivalent). Kinematics is NOT in this list — it now returns a
-// joint-limits-only model (kinematics.go) — but EndPosition/Geometries/
-// Get3DModels need real link geometry, which that model deliberately
-// doesn't have.
-var errPhase3 = errors.New("not implemented yet; needs a full link/geometry model, not just joint limits")
-
-// EndPosition returns the current position of the arm. Deliberately stubbed
-// rather than serving the device-reported TCP (tl_cur_pos): its Euler
-// convention is unverified, and a real kinematic model would implement this
-// via forward kinematics instead. kinematics.go's model can't help here —
-// it carries joint limits only, no link geometry to compute a pose from.
+// EndPosition returns the current position of the arm, computed via the
+// kinematic model's forward kinematics (kinematics.go) from the current
+// joint positions — matches dobot's own EndPosition exactly (arm/cr10a.go:
+// model.Transform(inputs)).
+//
+// TEMPORARY: this unblocks the app's 3D scene viewer, which turned out to
+// require EndPosition to succeed before it renders anything at all — it's
+// not the final design. The real decision (serve the device-reported TCP
+// pose, tl_cur_pos, vs. compute via FK — and tl_cur_pos's Euler convention,
+// which was never confirmed against spatialmath's) is still open. See
+// PLAN.md Step 9.
 func (s *viamFairinoFairino) EndPosition(ctx context.Context, extra map[string]interface{}) (spatialmath.Pose, error) {
-	return nil, errPhase3
+	inputs, err := s.CurrentInputs(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return s.model.Transform(inputs)
 }
 
-// MoveToPosition moves the arm to the given absolute position.
+// MoveToPosition moves the arm to the given absolute position by delegating
+// to a motion.Service (s.motion — this robot's default "builtin" service
+// unless Config.Motion names another one; see that field's doc comment).
+// Mirrors viam-ufactory-xarm's MoveToPosition exactly (arm/comm.go), NOT
+// viam-dobot's self-contained armplanning.MoveArm: the service does the
+// same IK/self-collision-aware planning (using this arm's own
+// Kinematics()/Geometries() via the robot's frame system) that
+// armplanning.MoveArm did, but the nlopt/cgo dependency that requires now
+// lives in viam-server's own builtin motion service binary instead of this
+// module's — Viam ships viam-server pre-built with that already resolved,
+// avoiding the runtime "libnlopt.so.0: cannot open shared object file"
+// deployment failure the previous approach hit.
+//
+// Requires this arm's robot-config JSON entry to include a "frame" block
+// (at minimum a "parent", e.g. "world") — without it, the arm is never
+// added to the frame system, "<name>_origin" never exists, and this fails
+// with "component named <name> not found in robot frame system". That's a
+// robot-config change, not something this module can supply on its own.
+//
+// Execution goes through GoToInputs below, not MoveThroughJointPositions
+// directly — that's what the builtin motion service's plan executor
+// actually calls (framesystem.InputEnabled), so GoToInputs can't be left
+// stubbed once this depends on a motion service.
 func (s *viamFairinoFairino) MoveToPosition(ctx context.Context, pose spatialmath.Pose, extra map[string]interface{}) error {
-	return errPhase2
+	if s.motion == nil {
+		return errors.New("fairino cannot do MoveToPosition without a motion service available (see MoveToPosition's doc comment)")
+	}
+	ctx, done := s.opMgr.New(ctx)
+	defer done()
+	_, err := s.motion.Move(ctx, motion.MoveReq{
+		ComponentName: s.Name().Name,
+		Destination:   referenceframe.NewPoseInFrame(fmt.Sprintf("%s_origin", s.Name().Name), pose),
+	})
+	return err
 }
 
-// MoveThroughJointPositions moves the arm's joints through the given positions in the order they are specified.
+// MoveThroughJointPositions moves the arm's joints through the given
+// positions in order, via moveToJointPositionsOnce per waypoint. Doesn't
+// call s.opMgr.New itself — see that method's doc comment for why — so a
+// direct caller other than MoveToPosition or GoToInputs (which wrap one
+// operation around the whole multi-waypoint sequence) would currently run
+// without single-operation protection; matches viam-dobot's own
+// MoveThroughJointPositions, which has the same property.
+//
+// options (MaxVelRads/MaxAccRads) isn't consumed: this module's command
+// protocol only has a single fixed per-config speed (Config.JointSpeedPercent),
+// not a per-call override, unlike viam-dobot's VelJ/AccJ mapping.
 func (s *viamFairinoFairino) MoveThroughJointPositions(ctx context.Context, positions [][]referenceframe.Input, options *arm.MoveOptions, extra map[string]interface{}) error {
-	return errPhase2
+	for i, goal := range positions {
+		if err := s.moveToJointPositionsOnce(ctx, goal); err != nil {
+			return fmt.Errorf("waypoint %d/%d: %w", i+1, len(positions), err)
+		}
+	}
+	return nil
 }
 
+// GoToInputs moves the arm's joints through the given series of joint
+// positions. Delegates to MoveThroughJointPositions — this is the method
+// RDK's builtin motion service's plan executor actually calls
+// (framesystem.InputEnabled) to drive a MoveToPosition plan, so this
+// couldn't stay stubbed once MoveToPosition depends on a motion service.
+// Mirrors viam-ufactory-xarm's GoToInputs exactly (arm/xarm.go).
 func (s *viamFairinoFairino) GoToInputs(ctx context.Context, inputSteps ...[]referenceframe.Input) error {
-	return errPhase2
+	return s.MoveThroughJointPositions(ctx, inputSteps, nil, nil)
 }
 
 func (s *viamFairinoFairino) Stop(ctx context.Context, extra map[string]interface{}) error {
 	return errPhase2
 }
 
-// Kinematics returns the joint-limits-only model built in kinematics.go.
-// It exists specifically so arm.CheckDesiredJointPositions (used by
-// MoveToJointPositions) has real per-joint limits to validate against — it
-// is NOT a real kinematic chain and Transform()/Geometries() on it should
-// not be trusted for anything beyond DoF()/limits.
+// Kinematics returns the FR5-WML's kinematic model, built once at
+// construction time (kinematics.go's makeModelFrame) by parsing the URDF
+// shipped in the module tarball (arm/fr5wml.urdf).
 func (s *viamFairinoFairino) Kinematics(ctx context.Context) (referenceframe.Model, error) {
-	return nil, errPhase2
+	return s.model, nil
 }
 
+// Geometries returns the arm's current collision geometry: the kinematic
+// model's link geometries (parsed from the URDF's <collision> meshes,
+// kinematics.go) posed at the arm's current joint positions.
+//
+// Meshes go through rebuildMeshForPLYBug (see its doc comment) to work
+// around an RDK bug where a mesh loaded from STL serializes as garbage
+// binary bytes mislabeled ContentType "ply" — this broke the app's 3D scene
+// viewer's getGeometries call outright (goply panic: "Invalid ply file"),
+// confirmed via TestGeometryProtoRoundTrip. Non-mesh geometries (box,
+// sphere, capsule) aren't affected and pass through unchanged.
 func (s *viamFairinoFairino) Geometries(ctx context.Context, extra map[string]interface{}) ([]spatialmath.Geometry, error) {
-	return nil, errPhase3
+	inputs, err := s.CurrentInputs(ctx)
+	if err != nil {
+		return nil, err
+	}
+	gif, err := s.model.Geometries(inputs)
+	if err != nil {
+		return nil, err
+	}
+	geoms := gif.Geometries()
+	for i, g := range geoms {
+		geoms[i] = rebuildMeshForPLYBug(g)
+	}
+	return geoms, nil
 }
 
-// Get3DModels returns the 3D models of the arm.
+// rebuildMeshForPLYBug works around an RDK bug in spatialmath.Mesh: a mesh
+// loaded from a non-PLY source (our case: STL, via
+// referenceframe.ParseModelXMLFile's <collision> mesh loading) has its
+// rawBytes field populated with the *original* file's bytes (raw binary
+// STL, in our case). Mesh.ensurePLYBytes only regenerates real PLY when
+// rawBytes is nil, so it returns those raw STL bytes unchanged — and
+// Mesh.ToProtobuf unconditionally labels whatever ensurePLYBytes returns as
+// ContentType "ply" regardless. The result: GetGeometries sends raw binary
+// STL data mislabeled as PLY, which goply (RDK's PLY reader) can't parse,
+// panicking with "Invalid ply file" the moment it reads the STL header
+// instead of the literal string "ply" — reproduced directly in
+// TestGeometryProtoRoundTrip. This affects any module serving Geometries()
+// for STL-sourced meshes, not just ours; worth reporting upstream.
+//
+// The fix: spatialmath.NewMesh(pose, triangles, label) — unlike the
+// STL/PLY-file constructors — never sets rawBytes, so a mesh built this way
+// correctly regenerates PLY on demand. Rebuilding from the same pose/
+// triangles/label is otherwise a no-op geometrically.
+func rebuildMeshForPLYBug(g spatialmath.Geometry) spatialmath.Geometry {
+	mesh, ok := g.(*spatialmath.Mesh)
+	if !ok {
+		return g
+	}
+	return spatialmath.NewMesh(mesh.Pose(), mesh.Triangles(), mesh.Label())
+}
+
+// meshVisualDir is arm/meshes/fr5wml/visual's location relative to the
+// module's root (VIAM_MODULE_ROOT) — the same .glb files the URDF's own
+// <visual> tags reference (see PLAN.md Step 4), not a separate copy.
+const meshVisualDir = "arm/meshes/fr5wml/visual"
+
+// Get3DModels returns the bundled per-link visualization meshes as binary
+// glTF (GLB, model/gltf-binary — the app's 3D scene viewer renders glTF,
+// not PLY), keyed by link/frame name (the .glb filename minus extension,
+// e.g. "wrist3_Link.glb" -> "wrist3_Link", which matches the URDF's own
+// link names exactly since that's how they were generated — see PLAN.md
+// Steps 2/4).
+//
+// If VIAM_MODULE_ROOT is unset, logs a warning and returns an empty map
+// with a nil error rather than failing — 3D visualization is simply
+// unavailable in that environment (unit tests, developer workstations
+// without a real module install). A per-file read failure returns a
+// wrapped error.
+//
+// Results are cached on the struct after the first successful build; the
+// returned map is a shallow copy so callers can't mutate the cache.
 func (s *viamFairinoFairino) Get3DModels(ctx context.Context, extra map[string]interface{}) (map[string]*commonpb.Mesh, error) {
-	return nil, errPhase3
+	root := os.Getenv("VIAM_MODULE_ROOT")
+	if root == "" {
+		s.logger.Warn("Get3DModels: VIAM_MODULE_ROOT is not set; returning empty mesh map")
+		return map[string]*commonpb.Mesh{}, nil
+	}
+
+	s.meshMu.Lock()
+	defer s.meshMu.Unlock()
+
+	if s.meshCache != nil {
+		return cloneMeshMap(s.meshCache), nil
+	}
+
+	built, err := buildMeshMap(root)
+	if err != nil {
+		return nil, err
+	}
+	s.meshCache = built
+	return cloneMeshMap(built), nil
+}
+
+// buildMeshMap reads every .glb under moduleRoot/meshVisualDir and keys the
+// raw bytes by filename minus extension.
+func buildMeshMap(moduleRoot string) (map[string]*commonpb.Mesh, error) {
+	dir := filepath.Join(moduleRoot, meshVisualDir)
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil, fmt.Errorf("reading mesh dir %q: %w", dir, err)
+	}
+
+	out := make(map[string]*commonpb.Mesh, len(entries))
+	for _, entry := range entries {
+		if entry.IsDir() || filepath.Ext(entry.Name()) != ".glb" {
+			continue
+		}
+		path := filepath.Join(dir, entry.Name())
+		//nolint:gosec // path is built from the module root and a directory listing, no user input.
+		glb, err := os.ReadFile(path)
+		if err != nil {
+			return nil, fmt.Errorf("loading mesh %q: %w", path, err)
+		}
+		name := strings.TrimSuffix(entry.Name(), ".glb")
+		out[name] = &commonpb.Mesh{
+			ContentType: "model/gltf-binary",
+			Mesh:        glb,
+		}
+	}
+	return out, nil
+}
+
+// cloneMeshMap returns a shallow copy of m (a fresh map sharing the same
+// *commonpb.Mesh values), so a caller mutating the returned map can't
+// corrupt the cached one.
+func cloneMeshMap(m map[string]*commonpb.Mesh) map[string]*commonpb.Mesh {
+	out := make(map[string]*commonpb.Mesh, len(m))
+	for k, v := range m {
+		out[k] = v
+	}
+	return out
 }
