@@ -5,11 +5,10 @@ Viam `arm` component module for the Fairino FR5-WML collaborative robot.
 The module connects to the controller's status port (TCP 8083, fixed) for
 feedback and the command port (TCP 8080, fixed) for motion, and has a real
 kinematic model (`Kinematics`/`Geometries`/`Get3DModels`, including 3D-scene
-rendering in the Viam app). See [PLAN.md](PLAN.md) for the detailed
-implementation history — in particular its STATUS section: **the kinematic
-model's link lengths are CAD-corrected but its meshes and mass/inertia are
-still known-inaccurate placeholders**, pending the correct source files for
-this exact arm variant (FR5-WML). `Stop` remains unimplemented.
+rendering in the Viam app). **The kinematic model's link lengths are
+CAD-corrected but its meshes and mass/inertia are still known-inaccurate
+placeholders**, pending the correct source files for this exact arm variant
+(FR5-WML). `Stop` remains unimplemented.
 
 ## Cartesian motion (`MoveToPosition`) requires a `"frame"` config block
 
@@ -59,7 +58,7 @@ This module provides the following model(s):
 | `host` | string | no | Controller IP address. Defaults to `192.168.58.2` (the Fairino factory default). |
 | `tool_num` / `workpiece_num` | int | no | Active tool/workpiece coordinate frame, 0-14 each. Default 0 (no tool, base workpiece). |
 | `joint_speed_percent` | int | no | `MoveJ`'s speed field, 1-100. Default 20 (matches `fairino-python-sdk`'s own `MoveJ` default). |
-| `use_urdf` | bool | no | Use the on-disk URDF (`arm/fr5wml.urdf`) as the kinematics source instead of the default embedded JSON. Requires `VIAM_MODULE_ROOT` to be set (true for a normal deployment). See [PLAN.md](PLAN.md) Step 10 for why JSON is the default. |
+| `use_urdf` | bool | no | Use the on-disk URDF (`arm/fr5wml.urdf`) as the kinematics source instead of the default embedded JSON. Requires `VIAM_MODULE_ROOT` to be set (true for a normal deployment). JSON is the default because it's the only one the Viam app's joint-limit sliders currently parse correctly. |
 | `mesh_decimation_ratios` | []float | no | Only used when `use_urdf` is true; per-collision-mesh decimation ratios (document order). |
 | `motion` | string | no | Name of the `motion.Service` `MoveToPosition` delegates to. Defaults to this robot's `"builtin"` motion service if available (optional dependency); naming one explicitly makes it a hard dependency instead. See the Cartesian motion section above. |
 
