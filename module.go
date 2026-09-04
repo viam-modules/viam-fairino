@@ -158,6 +158,11 @@ type viamFairinoFairino struct {
 	logger logging.Logger
 	cfg    *Config
 
+	// host is the resolved controller address (cfg.Host or the default). Kept
+	// separately because it is the key the shared status client is registered
+	// under — releasing with cfg.Host would miss the default-host case.
+	host string
+
 	// model is the selected robot's kinematic model, built once at
 	// construction time by kinematics.go's makeModelFrame (per conf.Model).
 	model referenceframe.Model
@@ -277,17 +282,16 @@ func NewFairino(ctx context.Context, deps resource.Dependencies, name resource.N
 		name:          name,
 		logger:        logger,
 		cfg:           conf,
+		host:          host,
 		model:         model,
 		meshVisualDir: assets.meshVisualDir,
 		motion:        motionSvc,
-		status:        newStatusClient(host, statusPort, logger),
+		status:        acquireStatusClient(ctx, host, statusPort, logger),
 		cmd:           cmd,
 		opMgr:         operation.NewSingleOperationManager(),
 		cancelCtx:     cancelCtx,
 		cancelFunc:    cancelFunc,
 	}
-	s.status.start(cancelCtx)
-
 	// Wait for the first status frame so early API calls don't race the
 	// connection; warn rather than fail so the resource can come up while the
 	// robot is off and recover via the reconnect loop.
@@ -629,7 +633,7 @@ func orDefaultInt(v, def int) int {
 }
 
 func (s *viamFairinoFairino) Close(context.Context) error {
-	s.status.stop()
+	releaseStatusClient(s.host, statusPort)
 	_ = s.cmd.close()
 	s.cancelFunc()
 	return nil

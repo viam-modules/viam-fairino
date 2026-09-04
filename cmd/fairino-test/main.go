@@ -1,6 +1,6 @@
 // fairino-test is a hardware bring-up CLI for driving a real Fairino controller
 // directly, without a running viam-server. It exercises the same code paths as
-// the module (arm MoveJ, gripper XML-RPC) so behavior seen here matches the
+// the module (arm MoveJ, gripper MoveGripper) so behavior seen here matches the
 // deployed component.
 //
 // Usage:
@@ -13,8 +13,8 @@
 //	joints                       current joint positions (degrees)
 //	jog <joint 1-6> <deltaDeg>   move one joint by delta degrees (blocking MoveJ)
 //
-//	gripper status               config + current position + motion state
-//	gripper config               configured company/device/software/bus
+//	gripper status               live gripper state from the 8083 status feed
+//	gripper config               configured company/device/software
 //	gripper activate             reset + activate + wait
 //	gripper open                 open (MoveGripper to open position)
 //	gripper close                close (MoveGripper to grab position)
@@ -197,15 +197,14 @@ func runGripper(ctx context.Context, host string, logger logging.Logger, args []
 		fmt.Println("deactivated (ActGripper 0 / reset)")
 		return nil
 	case "reset":
-		if _, err := g.DoCommand(ctx, map[string]any{"command": "reset_error"}); err != nil {
-			return err
-		}
-		fmt.Println("ResetAllError ok; activating...")
+		// The command protocol has no general error-reset (the XML-RPC-era
+		// "ResetAllError" has no chapter-7 equivalent), so this is now just the
+		// reset+activate cycle, which is what actually clears a stuck gripper.
 		st, err := g.DoCommand(ctx, map[string]any{"command": "activate"})
 		if err != nil {
 			return err
 		}
-		fmt.Printf("activated: %v\n", st)
+		fmt.Printf("reset + activated: %v\n", st)
 		return nil
 	case "open":
 		fmt.Println("opening...")
