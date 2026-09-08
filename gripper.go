@@ -127,6 +127,12 @@ const errcodeGripperMove = 73
 // MoveGripper, covering the controller's own overhead past the move's timeout.
 const moveAckMargin = 5 * time.Second
 
+// gripperSettleTimeout bounds how long Grab waits for the status feed (8083) to
+// publish a post-move frame before reading hold state. The blocking MoveGripper
+// ack (8080) can beat the status feed by a frame or two, so a hold check run the
+// instant the move returns can read a stale, pre-clamp gripper_motion_done.
+const gripperSettleTimeout = 2 * time.Second
+
 type fairinoGripper struct {
 	resource.AlwaysRebuild
 
@@ -306,11 +312,33 @@ func (g *fairinoGripper) Grab(ctx context.Context, extra map[string]any) (bool, 
 	if err := g.moveGripper(ctx, g.grabPos); err != nil {
 		return false, err
 	}
+	// The 8080 move ack can arrive a frame or two before the 8083 status feed
+	// reflects the clamp, so wait for a fresh, settled frame before reading hold
+	// state — otherwise a real grab reads stale (pre-clamp) and reports false.
+	g.waitForGripperSettled(ctx, time.Now())
 	status, err := g.IsHoldingSomething(ctx, extra)
 	if err != nil {
 		return false, err
 	}
 	return status.IsHoldingSomething, nil
+}
+
+// waitForGripperSettled polls the status feed until it publishes a frame
+// captured after `after` whose gripper motion has stopped (not "moving"), so a
+// hold check run next reflects the move just issued rather than a stale
+// pre-move frame. Returns once settled or after gripperSettleTimeout; callers
+// read the resulting state via the status feed as usual.
+func (g *fairinoGripper) waitForGripperSettled(ctx context.Context, after time.Time) {
+	deadline := time.Now().Add(gripperSettleTimeout)
+	for time.Now().Before(deadline) && ctx.Err() == nil {
+		fr, ok, _ := g.status.latest()
+		if ok && fr.GripperValid && fr.ReceivedAt.After(after) && fr.GripperMotionDone != gripperMotionMoving {
+			return
+		}
+		if !sleepCtx(ctx, 20*time.Millisecond) {
+			return
+		}
+	}
 }
 
 // IsHoldingSomething reports whether the gripper is holding an object, from the
