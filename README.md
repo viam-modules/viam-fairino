@@ -44,7 +44,7 @@ don't need it, only `MoveToPosition`.
 
 This module provides the following model(s):
 
-- [`viam-soleng:viam-fairino:fairino`](3a94d2f9082b44ad8569a9d8a1330050_viam-fairino_fairino.md) - Fairino FR5-WML arm
+- [`viam-soleng:viam-fairino:fairino`](viam-soleng_viam-fairino_fairino.md) - Fairino FR5-WML arm
 - `viam-soleng:viam-fairino:gripper` - Fairino-configured gripper (generic, percentage-based)
 
 ## Configuration

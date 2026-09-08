@@ -34,7 +34,7 @@ import (
 
 // Gripper is the model triple for the Fairino gripper component. It shares the
 // arm's namespace/family (see Fairino in module.go).
-var Gripper = resource.NewModel("3a94d2f9082b44ad8569a9d8a1330050", "viam-fairino", "gripper")
+var Gripper = resource.NewModel("viam-soleng", "viam-fairino", "gripper")
 
 func init() {
 	resource.RegisterComponent(gripper.API, Gripper,
