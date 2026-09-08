@@ -82,6 +82,71 @@ func newCommandClient(host string, port int, logger logging.Logger) *commandClie
 	return &commandClient{host: host, port: port, logger: logger}
 }
 
+// ---------------------------------------------------------------------------
+// Shared command client.
+//
+// The controller's command port (8080) accepts only a very small number of
+// concurrent connections — empirically it saturates almost immediately. The
+// arm and gripper both talk to the same controller, so if each held its own
+// command connection the second to construct would starve the first ("arm
+// can't connect" once the gripper is added). They therefore share one
+// reference-counted command client per host:port, exactly like the status
+// reader (status.go). Requests already serialize through commandClient.mu, so
+// one shared connection carrying both resources' traffic is correct.
+// ---------------------------------------------------------------------------
+
+var (
+	sharedCommandMu      sync.Mutex
+	sharedCommandClients = map[string]*sharedCommandEntry{}
+)
+
+type sharedCommandEntry struct {
+	client *commandClient
+	refs   int
+}
+
+// acquireCommandClient returns the shared command client for host:port,
+// creating it on first use. Every acquire must be paired with a
+// releaseCommandClient.
+func acquireCommandClient(host string, port int, logger logging.Logger) *commandClient {
+	key := net.JoinHostPort(host, strconv.Itoa(port))
+
+	sharedCommandMu.Lock()
+	defer sharedCommandMu.Unlock()
+
+	if e, ok := sharedCommandClients[key]; ok {
+		e.refs++
+		logger.Debugw("reusing shared command client", "addr", key, "refs", e.refs)
+		return e.client
+	}
+	c := newCommandClient(host, port, logger)
+	sharedCommandClients[key] = &sharedCommandEntry{client: c, refs: 1}
+	logger.Debugw("created shared command client", "addr", key)
+	return c
+}
+
+// releaseCommandClient drops one reference to the shared command client for
+// host:port, closing it when the last resource using it goes away.
+func releaseCommandClient(host string, port int) {
+	key := net.JoinHostPort(host, strconv.Itoa(port))
+
+	sharedCommandMu.Lock()
+	e, ok := sharedCommandClients[key]
+	if !ok {
+		sharedCommandMu.Unlock()
+		return
+	}
+	e.refs--
+	if e.refs > 0 {
+		sharedCommandMu.Unlock()
+		return
+	}
+	delete(sharedCommandClients, key)
+	sharedCommandMu.Unlock()
+
+	_ = e.client.close()
+}
+
 // connect opens (or reopens) the TCP connection to the command port.
 func (c *commandClient) connect(ctx context.Context) error {
 	c.connMu.Lock()

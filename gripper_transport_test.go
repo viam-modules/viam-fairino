@@ -261,3 +261,35 @@ func TestSharedStatusClientRefcount(t *testing.T) {
 	// A release with no outstanding acquire must be a no-op, not a panic.
 	releaseStatusClient(host, statusPort)
 }
+
+func TestSharedCommandClientRefcount(t *testing.T) {
+	logger := logging.NewTestLogger(t)
+	host := "203.0.113.2" // TEST-NET-3: never routable; the client connects lazily anyway
+
+	a := acquireCommandClient(host, commandPort, logger)
+	b := acquireCommandClient(host, commandPort, logger)
+	if a != b {
+		t.Fatal("two acquires for the same host returned different command clients")
+	}
+
+	key := net.JoinHostPort(host, strconv.Itoa(commandPort))
+
+	releaseCommandClient(host, commandPort)
+	sharedCommandMu.Lock()
+	_, stillThere := sharedCommandClients[key]
+	sharedCommandMu.Unlock()
+	if !stillThere {
+		t.Error("command client dropped while a reference was still held")
+	}
+
+	releaseCommandClient(host, commandPort)
+	sharedCommandMu.Lock()
+	_, stillThere = sharedCommandClients[key]
+	sharedCommandMu.Unlock()
+	if stillThere {
+		t.Error("command client not released after the last reference went away")
+	}
+
+	// A release with no outstanding acquire must be a no-op, not a panic.
+	releaseCommandClient(host, commandPort)
+}

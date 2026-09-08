@@ -235,7 +235,15 @@ func NewFairino(ctx context.Context, deps resource.Dependencies, name resource.N
 		host = defaultHost
 	}
 
-	cmd := newCommandClient(host, commandPort, logger)
+	cmd := acquireCommandClient(host, commandPort, logger)
+	// Release the shared command client if construction fails before the
+	// resource takes ownership (its Close is what releases it thereafter).
+	cmdOwned := false
+	defer func() {
+		if !cmdOwned {
+			releaseCommandClient(host, commandPort)
+		}
+	}()
 
 	// Resolve the robot model. An explicit conf.Model wins (and lets the arm
 	// construct while the robot is unreachable); otherwise auto-detect it by
@@ -292,6 +300,7 @@ func NewFairino(ctx context.Context, deps resource.Dependencies, name resource.N
 		cancelCtx:     cancelCtx,
 		cancelFunc:    cancelFunc,
 	}
+	cmdOwned = true // s now owns cmd; its Close releases it
 	// Wait for the first status frame so early API calls don't race the
 	// connection; warn rather than fail so the resource can come up while the
 	// robot is off and recover via the reconnect loop.
@@ -634,7 +643,7 @@ func orDefaultInt(v, def int) int {
 
 func (s *viamFairinoFairino) Close(context.Context) error {
 	releaseStatusClient(s.host, statusPort)
-	_ = s.cmd.close()
+	releaseCommandClient(s.host, commandPort)
 	s.cancelFunc()
 	return nil
 }

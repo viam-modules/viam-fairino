@@ -185,11 +185,12 @@ func NewFairinoGripper(ctx context.Context, name resource.Name, conf *GripperCon
 		name:   name,
 		logger: logger,
 		host:   host,
-		// The gripper has its own command connection (the controller happily
-		// serves several clients on 8080) but SHARES the status reader with the
-		// arm: the status port admits only one client at a time, so a second
-		// connection would lock one of the two resources out of its state feed.
-		cmd:          newCommandClient(host, commandPort, logger),
+		// SHARE both connections with the arm: the command port (8080) accepts
+		// only a tiny number of connections and the status port (8083) admits
+		// one client, so each resource holding its own would starve the other
+		// ("arm can't connect" once the gripper is added). Both are
+		// reference-counted per host:port (command.go / status.go).
+		cmd:          acquireCommandClient(host, commandPort, logger),
 		status:       acquireStatusClient(ctx, host, statusPort, logger),
 		opMgr:        operation.NewSingleOperationManager(),
 		model:        model,
@@ -205,6 +206,7 @@ func NewFairinoGripper(ctx context.Context, name resource.Name, conf *GripperCon
 	if conf.Configure {
 		if err := g.cmd.setGripperConfig(ctx, conf.Company, conf.Device, conf.SoftwareVersion, conf.Bus); err != nil {
 			releaseStatusClient(host, statusPort)
+			releaseCommandClient(host, commandPort)
 			return nil, fmt.Errorf("SetGripperConfig(company=%d device=%d): %w", conf.Company, conf.Device, err)
 		}
 		logger.CInfow(ctx, "configured gripper", "company", conf.Company, "device", conf.Device,
@@ -478,7 +480,8 @@ func (g *fairinoGripper) Status(ctx context.Context) (map[string]any, error) {
 // own real resources.
 func (g *fairinoGripper) Close(ctx context.Context) error {
 	releaseStatusClient(g.host, statusPort)
-	return g.cmd.close()
+	releaseCommandClient(g.host, commandPort)
+	return nil
 }
 
 // DoCommand exposes raw controller queries/actions, useful for discovering the
