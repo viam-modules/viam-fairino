@@ -35,3 +35,6 @@ reload-*/
 
 # stray go build output for the bring-up CLI
 /fairino-test
+
+# source description package the URDF/meshes were generated from (kept locally, not committed)
+fr5_wml_description.zip

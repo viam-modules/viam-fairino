@@ -152,9 +152,7 @@ func (c *commandClient) connect(ctx context.Context) error {
 	c.connMu.Lock()
 	defer c.connMu.Unlock()
 
-	// TEMP verbose bring-up logging — pare back to Debug once the command
-	// port is confirmed working against real hardware.
-	c.logger.Infow("command port: dialing", "host", c.host, "port", c.port)
+	c.logger.Debugw("command port: dialing", "host", c.host, "port", c.port)
 
 	if c.conn != nil {
 		_ = c.conn.Close()
@@ -163,10 +161,10 @@ func (c *commandClient) connect(ctx context.Context) error {
 	d := net.Dialer{Timeout: cmdDialTimeout}
 	conn, err := d.DialContext(ctx, "tcp", net.JoinHostPort(c.host, strconv.Itoa(c.port)))
 	if err != nil {
-		c.logger.Infow("command port: dial failed", "host", c.host, "port", c.port, "err", err)
+		c.logger.Debugw("command port: dial failed", "host", c.host, "port", c.port, "err", err)
 		return fmt.Errorf("command port dial %s:%d: %w", c.host, c.port, err)
 	}
-	c.logger.Infow("command port: connected", "host", c.host, "port", c.port, "local_addr", conn.LocalAddr())
+	c.logger.Debugw("command port: connected", "host", c.host, "port", c.port, "local_addr", conn.LocalAddr())
 	c.conn = conn
 	c.reader = bufio.NewReaderSize(conn, 4096)
 	return nil
@@ -206,13 +204,9 @@ func (c *commandClient) send(ctx context.Context, cmdID int, data string) (strin
 	reqCnt := int(c.cnt.Add(1))
 	frame := encodeCmdFrame(reqCnt, cmdID, data)
 
-	// TEMP verbose bring-up logging — every frame in both directions, plus
-	// timing. This is the main thing we need to watch closely while
-	// figuring out the real errcode convention (see parseErrcode) and
-	// generally confirming the documented protocol actually matches what
-	// the controller does. Pare back to Debug once that's settled.
+	// Debug-level trace of every frame in both directions, plus timing.
 	sendStart := time.Now()
-	c.logger.Infow("command port: sending frame", "cnt", reqCnt, "cmd_id", cmdID, "data", data, "frame", frame)
+	c.logger.Debugw("command port: sending frame", "cnt", reqCnt, "cmd_id", cmdID, "data", data, "frame", frame)
 
 	// No deadline on ctx typically means the caller means to bound the whole
 	// operation (queue + physical motion), not just this ack — same
@@ -225,7 +219,7 @@ func (c *commandClient) send(ctx context.Context, cmdID int, data string) (strin
 	_ = conn.SetReadDeadline(deadline)
 
 	if _, err := conn.Write([]byte(frame)); err != nil {
-		c.logger.Infow("command port: write failed", "cnt", reqCnt, "cmd_id", cmdID, "err", err)
+		c.logger.Debugw("command port: write failed", "cnt", reqCnt, "cmd_id", cmdID, "err", err)
 		_ = c.close()
 		return "", fmt.Errorf("command write %q: %w", data, err)
 	}
@@ -235,18 +229,18 @@ func (c *commandClient) send(ctx context.Context, cmdID int, data string) (strin
 	c.connMu.RUnlock()
 	raw, err := readCmdFrame(reader)
 	if err != nil {
-		c.logger.Infow("command port: read failed", "cnt", reqCnt, "cmd_id", cmdID, "elapsed", time.Since(sendStart), "err", err)
+		c.logger.Debugw("command port: read failed", "cnt", reqCnt, "cmd_id", cmdID, "elapsed", time.Since(sendStart), "err", err)
 		_ = c.close()
 		return "", fmt.Errorf("command read response to %q: %w", data, err)
 	}
-	c.logger.Infow("command port: received raw frame", "cnt", reqCnt, "cmd_id", cmdID, "raw", string(raw), "elapsed", time.Since(sendStart))
+	c.logger.Debugw("command port: received raw frame", "cnt", reqCnt, "cmd_id", cmdID, "raw", string(raw), "elapsed", time.Since(sendStart))
 
 	respCnt, respCmdID, respData, err := decodeCmdFrame(raw)
 	if err != nil {
-		c.logger.Infow("command port: response decode failed", "cnt", reqCnt, "cmd_id", cmdID, "raw", string(raw), "err", err)
+		c.logger.Debugw("command port: response decode failed", "cnt", reqCnt, "cmd_id", cmdID, "raw", string(raw), "err", err)
 		return "", fmt.Errorf("malformed response to %q: %w", data, err)
 	}
-	c.logger.Infow("command port: parsed response", "sent_cnt", reqCnt, "resp_cnt", respCnt, "cmd_id", respCmdID, "data", respData)
+	c.logger.Debugw("command port: parsed response", "sent_cnt", reqCnt, "resp_cnt", respCnt, "cmd_id", respCmdID, "data", respData)
 	if respCnt != reqCnt {
 		// The manual defines CNT as the request/response correlation id, but
 		// we serialize one request at a time, so a mismatch just means the
@@ -259,7 +253,7 @@ func (c *commandClient) send(ctx context.Context, cmdID int, data string) (strin
 		// See cmdIDScriptError's doc comment: the controller ran our command
 		// through what looks like a Lua interpreter and the handler errored.
 		scriptErr := scriptErrorFromData(respData)
-		c.logger.Infow("command port: controller reported a script error", "cnt", reqCnt, "cmd_id", cmdID, "data", respData, "err", scriptErr)
+		c.logger.Debugw("command port: controller reported a script error", "cnt", reqCnt, "cmd_id", cmdID, "data", respData, "err", scriptErr)
 		return "", fmt.Errorf("command %q: %w", data, scriptErr)
 	}
 	if respCmdID != cmdID {
@@ -492,18 +486,17 @@ func formatMoveJ(p moveJParams) string {
 // port (statusFrame.MotionDone) for that, same division of labor as
 // dobot's jointMovJ + waitForMotionCompleteLocked.
 func (c *commandClient) moveJ(ctx context.Context, p moveJParams) error {
-	// TEMP verbose bring-up logging.
-	c.logger.Infow("moveJ: params", "joints_deg", p.Joints, "pose", p.Pose,
+	c.logger.Debugw("moveJ: params", "joints_deg", p.Joints, "pose", p.Pose,
 		"tool_num", p.ToolNum, "workpiece_num", p.WorkPieceNum,
 		"speed_pct", p.SpeedPercent, "accel_pct", p.AccelPercent, "ovl_pct", p.OverridePct,
 		"blend_t", p.BlendT, "offset_flag", p.OffsetFlag)
 	resp, err := c.send(ctx, cmdIDMoveJ, formatMoveJ(p))
 	if err != nil {
-		c.logger.Infow("moveJ: send failed", "err", err)
+		c.logger.Debugw("moveJ: send failed", "err", err)
 		return err
 	}
 	err = parseErrcode(resp)
-	c.logger.Infow("moveJ: result", "resp", resp, "err", err)
+	c.logger.Debugw("moveJ: result", "resp", resp, "err", err)
 	return err
 }
 
@@ -523,14 +516,14 @@ func (c *commandClient) moveJ(ctx context.Context, p moveJParams) error {
 func (c *commandClient) getForwardKin(ctx context.Context, jointsDeg [6]float64) ([6]float64, error) {
 	data := fmt.Sprintf("GetForwardKin(%.4f,%.4f,%.4f,%.4f,%.4f,%.4f)",
 		jointsDeg[0], jointsDeg[1], jointsDeg[2], jointsDeg[3], jointsDeg[4], jointsDeg[5])
-	c.logger.Infow("getForwardKin: request", "joints_deg", jointsDeg)
+	c.logger.Debugw("getForwardKin: request", "joints_deg", jointsDeg)
 	resp, err := c.send(ctx, cmdIDGetForwardKin, data)
 	if err != nil {
-		c.logger.Infow("getForwardKin: send failed", "err", err)
+		c.logger.Debugw("getForwardKin: send failed", "err", err)
 		return [6]float64{}, err
 	}
 	pose, err := parsePose6(resp)
-	c.logger.Infow("getForwardKin: result", "resp", resp, "pose", pose, "err", err)
+	c.logger.Debugw("getForwardKin: result", "resp", resp, "pose", pose, "err", err)
 	return pose, err
 }
 
@@ -554,14 +547,14 @@ func parsePose6(data string) ([6]float64, error) {
 
 // stop sends STOP (manual §2.35, CMD_ID 102), which halts in-flight motion.
 func (c *commandClient) stop(ctx context.Context) error {
-	c.logger.Infow("stop: sending STOP")
+	c.logger.Debugw("stop: sending STOP")
 	resp, err := c.send(ctx, cmdIDStop, "STOP")
 	if err != nil {
-		c.logger.Infow("stop: send failed", "err", err)
+		c.logger.Debugw("stop: send failed", "err", err)
 		return err
 	}
 	err = parseErrcode(resp)
-	c.logger.Infow("stop: result", "resp", resp, "err", err)
+	c.logger.Debugw("stop: result", "resp", resp, "err", err)
 	return err
 }
 

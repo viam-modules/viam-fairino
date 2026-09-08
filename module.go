@@ -521,15 +521,13 @@ func (s *viamFairinoFairino) moveToJointPositionsOnce(ctx context.Context, posit
 		return errors.New("moveToJointPositionsOnce: blendT must not be 0 (0ms blend is no different from a full stop)")
 	}
 	moveStart := time.Now()
-	// TEMP verbose bring-up logging — pare back to Debug once MoveJ is
-	// confirmed working end-to-end on hardware.
-	s.logger.Infow("moveToJointPositionsOnce: called", "positions_rad", positions)
+	s.logger.Debugw("moveToJointPositionsOnce: called", "positions_rad", positions)
 
 	var targetDeg [6]float64
 	for i := 0; i < 6; i++ {
 		targetDeg[i] = rdkutils.RadToDeg(positions[i])
 	}
-	s.logger.Infow("moveToJointPositionsOnce: target", "target_deg", targetDeg)
+	s.logger.Debugw("moveToJointPositionsOnce: target", "target_deg", targetDeg)
 
 	// desc_pos: see moveJParams.Pose's doc comment in command.go — the
 	// controller validates this against the joint target, so it must be the
@@ -541,10 +539,10 @@ func (s *viamFairinoFairino) moveToJointPositionsOnce(ctx context.Context, posit
 	// to change it.
 	targetPose, err := s.cmd.getForwardKin(ctx, targetDeg)
 	if err != nil {
-		s.logger.Infow("moveToJointPositionsOnce: GetForwardKin failed", "err", err)
+		s.logger.Debugw("moveToJointPositionsOnce: GetForwardKin failed", "err", err)
 		return fmt.Errorf("GetForwardKin: %w", err)
 	}
-	s.logger.Infow("moveToJointPositionsOnce: forward kinematics for target", "target_deg", targetDeg, "target_pose", targetPose)
+	s.logger.Debugw("moveToJointPositionsOnce: forward kinematics for target", "target_deg", targetDeg, "target_pose", targetPose)
 
 	params := moveJParams{
 		Joints:       targetDeg,
@@ -558,7 +556,7 @@ func (s *viamFairinoFairino) moveToJointPositionsOnce(ctx context.Context, posit
 	}
 
 	if err := s.cmd.moveJ(ctx, params); err != nil {
-		s.logger.Infow("moveToJointPositionsOnce: MoveJ ack failed", "elapsed", time.Since(moveStart), "err", err)
+		s.logger.Debugw("moveToJointPositionsOnce: MoveJ ack failed", "elapsed", time.Since(moveStart), "err", err)
 		return fmt.Errorf("MoveJ: %w", err)
 	}
 
@@ -566,13 +564,13 @@ func (s *viamFairinoFairino) moveToJointPositionsOnce(ctx context.Context, posit
 		// Blend: queued, blending into whatever's sent next — nothing to wait
 		// for. blendT > 0 rather than != blendTBlocking as a precaution: any
 		// non-positive value falls through to waiting.
-		s.logger.Infow("moveToJointPositionsOnce: MoveJ acknowledged (blend), not waiting for completion", "elapsed", time.Since(moveStart))
+		s.logger.Debugw("moveToJointPositionsOnce: MoveJ acknowledged (blend), not waiting for completion", "elapsed", time.Since(moveStart))
 		return nil
 	}
-	s.logger.Infow("moveToJointPositionsOnce: MoveJ acknowledged, waiting for motion to complete", "elapsed", time.Since(moveStart))
+	s.logger.Debugw("moveToJointPositionsOnce: MoveJ acknowledged, waiting for motion to complete", "elapsed", time.Since(moveStart))
 
 	err = s.waitForMotionComplete(ctx, targetDeg)
-	s.logger.Infow("moveToJointPositionsOnce: done", "elapsed", time.Since(moveStart), "err", err)
+	s.logger.Debugw("moveToJointPositionsOnce: done", "elapsed", time.Since(moveStart), "err", err)
 	return err
 }
 
@@ -583,22 +581,18 @@ func (s *viamFairinoFairino) moveToJointPositionsOnce(ctx context.Context, posit
 // on a fresh short-lived context before returning ctx.Err(), same shape as
 // viam-dobot's waitForMotionCompleteLocked.
 func (s *viamFairinoFairino) waitForMotionComplete(ctx context.Context, targetDeg [6]float64) error {
-	// TEMP verbose bring-up logging throughout this function — logs every
-	// poll tick, which is deliberately spammy while we're confirming
-	// MotionDone/JointDegs actually behave the way the manual says during a
-	// real move. Pare back to Debug (or drop the per-tick logs entirely)
-	// once that's confirmed.
+	// Per-poll-tick Debug logging of the MotionDone/JointDegs transitions.
 	pollStart := time.Now()
-	s.logger.Infow("waitForMotionComplete: entering start-grace phase", "grace", motionStartGrace)
+	s.logger.Debugw("waitForMotionComplete: entering start-grace phase", "grace", motionStartGrace)
 
 	startCtx, cancelGrace := context.WithTimeout(ctx, motionStartGrace)
 	defer cancelGrace()
 	for {
 		fr, ok, _ := s.status.latest()
-		s.logger.Infow("waitForMotionComplete: start-grace poll", "have_frame", ok,
+		s.logger.Debugw("waitForMotionComplete: start-grace poll", "have_frame", ok,
 			"motion_done", fr.MotionDone, "joint_deg", fr.JointDegs, "e_stop", fr.EmergencyStop)
 		if ok && !fr.MotionDone {
-			s.logger.Infow("waitForMotionComplete: motion started", "elapsed", time.Since(pollStart))
+			s.logger.Debugw("waitForMotionComplete: motion started", "elapsed", time.Since(pollStart))
 			break // motion has started
 		}
 		if ok && fr.EmergencyStop {
@@ -608,7 +602,7 @@ func (s *viamFairinoFairino) waitForMotionComplete(ctx context.Context, targetDe
 		case <-startCtx.Done():
 			// No transition seen within the grace window — fall through to
 			// the completion poll anyway; covers zero-distance moves.
-			s.logger.Infow("waitForMotionComplete: start-grace window elapsed with no MotionDone transition, falling through to completion poll", "elapsed", time.Since(pollStart))
+			s.logger.Debugw("waitForMotionComplete: start-grace window elapsed with no MotionDone transition, falling through to completion poll", "elapsed", time.Since(pollStart))
 			goto completed
 		case <-time.After(motionPollInterval):
 		}
@@ -618,7 +612,7 @@ completed:
 	for {
 		select {
 		case <-ctx.Done():
-			s.logger.Infow("waitForMotionComplete: ctx cancelled, sending STOP", "elapsed", time.Since(pollStart), "ctx_err", ctx.Err())
+			s.logger.Debugw("waitForMotionComplete: ctx cancelled, sending STOP", "elapsed", time.Since(pollStart), "ctx_err", ctx.Err())
 			stopCtx, cancelStop := context.WithTimeout(context.Background(), 2*time.Second)
 			_ = s.cmd.stop(stopCtx)
 			cancelStop()
@@ -628,10 +622,10 @@ completed:
 
 		fr, ok, _ := s.status.latest()
 		if !ok {
-			s.logger.Infow("waitForMotionComplete: completion poll — no status frame yet", "elapsed", time.Since(pollStart))
+			s.logger.Debugw("waitForMotionComplete: completion poll — no status frame yet", "elapsed", time.Since(pollStart))
 			continue
 		}
-		s.logger.Infow("waitForMotionComplete: completion poll", "elapsed", time.Since(pollStart),
+		s.logger.Debugw("waitForMotionComplete: completion poll", "elapsed", time.Since(pollStart),
 			"motion_done", fr.MotionDone, "joint_deg", fr.JointDegs, "target_deg", targetDeg,
 			"error_code", fr.ErrorCode, "e_stop", fr.EmergencyStop)
 		if fr.EmergencyStop {
@@ -642,10 +636,10 @@ completed:
 		}
 		if fr.MotionDone {
 			if jointsCloseDeg(fr.JointDegs, targetDeg, jointToleranceDeg) {
-				s.logger.Infow("waitForMotionComplete: motion complete, joints within tolerance", "elapsed", time.Since(pollStart), "joint_deg", fr.JointDegs)
+				s.logger.Debugw("waitForMotionComplete: motion complete, joints within tolerance", "elapsed", time.Since(pollStart), "joint_deg", fr.JointDegs)
 				return nil
 			}
-			s.logger.Infow("waitForMotionComplete: motion done but joints out of tolerance", "elapsed", time.Since(pollStart), "joint_deg", fr.JointDegs, "target_deg", targetDeg)
+			s.logger.Debugw("waitForMotionComplete: motion done but joints out of tolerance", "elapsed", time.Since(pollStart), "joint_deg", fr.JointDegs, "target_deg", targetDeg)
 			return fmt.Errorf("motion completed but joints did not reach target (got %v want %v degrees)", fr.JointDegs, targetDeg)
 		}
 	}

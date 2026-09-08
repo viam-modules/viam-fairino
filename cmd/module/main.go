@@ -11,7 +11,7 @@ import (
 func main() {
 	// ModularMain can take multiple APIModel arguments, if your module implements multiple models.
 	module.ModularMain(
-		resource.APIModel{arm.API, viamfairino.Fairino},
-		resource.APIModel{gripper.API, viamfairino.Gripper},
+		resource.APIModel{API: arm.API, Model: viamfairino.Fairino},
+		resource.APIModel{API: gripper.API, Model: viamfairino.Gripper},
 	)
 }
