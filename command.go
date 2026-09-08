@@ -33,6 +33,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"regexp"
@@ -79,6 +80,71 @@ type commandClient struct {
 
 func newCommandClient(host string, port int, logger logging.Logger) *commandClient {
 	return &commandClient{host: host, port: port, logger: logger}
+}
+
+// ---------------------------------------------------------------------------
+// Shared command client.
+//
+// The controller's command port (8080) accepts only a very small number of
+// concurrent connections — empirically it saturates almost immediately. The
+// arm and gripper both talk to the same controller, so if each held its own
+// command connection the second to construct would starve the first ("arm
+// can't connect" once the gripper is added). They therefore share one
+// reference-counted command client per host:port, exactly like the status
+// reader (status.go). Requests already serialize through commandClient.mu, so
+// one shared connection carrying both resources' traffic is correct.
+// ---------------------------------------------------------------------------
+
+var (
+	sharedCommandMu      sync.Mutex
+	sharedCommandClients = map[string]*sharedCommandEntry{}
+)
+
+type sharedCommandEntry struct {
+	client *commandClient
+	refs   int
+}
+
+// acquireCommandClient returns the shared command client for host:port,
+// creating it on first use. Every acquire must be paired with a
+// releaseCommandClient.
+func acquireCommandClient(host string, port int, logger logging.Logger) *commandClient {
+	key := net.JoinHostPort(host, strconv.Itoa(port))
+
+	sharedCommandMu.Lock()
+	defer sharedCommandMu.Unlock()
+
+	if e, ok := sharedCommandClients[key]; ok {
+		e.refs++
+		logger.Debugw("reusing shared command client", "addr", key, "refs", e.refs)
+		return e.client
+	}
+	c := newCommandClient(host, port, logger)
+	sharedCommandClients[key] = &sharedCommandEntry{client: c, refs: 1}
+	logger.Debugw("created shared command client", "addr", key)
+	return c
+}
+
+// releaseCommandClient drops one reference to the shared command client for
+// host:port, closing it when the last resource using it goes away.
+func releaseCommandClient(host string, port int) {
+	key := net.JoinHostPort(host, strconv.Itoa(port))
+
+	sharedCommandMu.Lock()
+	e, ok := sharedCommandClients[key]
+	if !ok {
+		sharedCommandMu.Unlock()
+		return
+	}
+	e.refs--
+	if e.refs > 0 {
+		sharedCommandMu.Unlock()
+		return
+	}
+	delete(sharedCommandClients, key)
+	sharedCommandMu.Unlock()
+
+	_ = e.client.close()
 }
 
 // connect opens (or reopens) the TCP connection to the command port.
@@ -215,7 +281,7 @@ var scriptErrorPattern = regexp.MustCompile(`robot errcode:(\d+)`)
 func scriptErrorFromData(data string) error {
 	if m := scriptErrorPattern.FindStringSubmatch(data); m != nil {
 		if code, err := strconv.Atoi(m[1]); err == nil {
-			return fmt.Errorf("controller returned error %d (%s) [raw: %s]", code, cmdErrorString(code), data)
+			return &ControllerError{Code: code, Raw: data}
 		}
 	}
 	return fmt.Errorf("controller reported a script error: %s", data)
@@ -329,7 +395,34 @@ func parseErrcode(data string) error {
 	if v == 0 || v == 1 {
 		return nil
 	}
-	return fmt.Errorf("controller returned error %d (%s)", v, cmdErrorString(v))
+	return &ControllerError{Code: v}
+}
+
+// ControllerError is a non-zero errcode returned by the controller, from either
+// a command's own errcode response or an embedded "robot errcode:N" script
+// error. Callers can inspect Code via errors.As to react to specific codes —
+// e.g. gripper.go retries on 73 ("gripper movement error").
+type ControllerError struct {
+	Code int
+
+	// Raw is the response text a script error was extracted from, kept so the
+	// message stays as informative as the untyped version was. Empty for a
+	// plain errcode response.
+	Raw string
+}
+
+func (e *ControllerError) Error() string {
+	if e.Raw != "" {
+		return fmt.Sprintf("controller returned error %d (%s) [raw: %s]", e.Code, cmdErrorString(e.Code), e.Raw)
+	}
+	return fmt.Sprintf("controller returned error %d (%s)", e.Code, cmdErrorString(e.Code))
+}
+
+// isControllerErrcode reports whether err is a *ControllerError with the given
+// code, at any depth in the wrap chain.
+func isControllerErrcode(err error, code int) bool {
+	var ce *ControllerError
+	return errors.As(err, &ce) && ce.Code == code
 }
 
 // moveJParams mirrors manual Table 2-1 (MoveJ() instruction protocol 1) in
@@ -472,4 +565,145 @@ func (c *commandClient) stop(ctx context.Context) error {
 	err = parseErrcode(resp)
 	c.logger.Infow("stop: result", "resp", resp, "err", err)
 	return err
+}
+
+// ---------------------------------------------------------------------------
+// Gripper commands (manual chapter 7.1, "Robot peripheral instructions").
+//
+// These are the same commands the vendor SDK issues over XML-RPC on TCP 20003,
+// but on the documented command port with documented framing — same names,
+// same argument order. Gripper *state* (position, motion-done, fault, activation)
+// is deliberately NOT read back here: chapter 7.1 has no GetGripperMotionDone
+// because the controller publishes that on the status port instead, so
+// gripper.go reads it from statusFrame (see constants.go's gripper offsets).
+// ---------------------------------------------------------------------------
+
+// setGripperConfig sends SetGripperConfig() (§7.1.1, CMD_ID 226), recording
+// which physical gripper is attached. Per hardware bring-up this only records
+// the vendor selection — it does not enable the end-tool RS-485 bus, which
+// still has to be done once on the controller (WebApp/teach pendant).
+func (c *commandClient) setGripperConfig(ctx context.Context, company, device, softwareVersion, bus int) error {
+	data := fmt.Sprintf("SetGripperConfig(%d,%d,%d,%d)", company, device, softwareVersion, bus)
+	resp, err := c.send(ctx, cmdIDSetGripperConfig, data)
+	if err != nil {
+		return err
+	}
+	return parseErrcode(resp)
+}
+
+// gripperConfig is GetGripperConfig()'s return value (§7.1.2, Table 7-1-2).
+type gripperConfig struct {
+	Company         int
+	Device          int
+	SoftwareVersion int
+
+	// Bus is a fourth value the controller actually returns but Table 7-1-2's
+	// return-value list omits (the table stops at id_softversion, while its own
+	// example frame shows four fields, and hardware returns four: a DH gripper
+	// came back "03 00 00 01"). Treated as optional so a controller that
+	// returns only three still parses.
+	Bus    int
+	HasBus bool
+}
+
+// getGripperConfig sends GetGripperConfig() (§7.1.2, CMD_ID 229). Unlike the
+// action commands its response carries no leading errcode — Table 7-1-2 lists
+// the return values directly.
+func (c *commandClient) getGripperConfig(ctx context.Context) (gripperConfig, error) {
+	resp, err := c.send(ctx, cmdIDGetGripperConfig, "GetGripperConfig()")
+	if err != nil {
+		return gripperConfig{}, err
+	}
+	vals, err := parseIntList(resp)
+	if err != nil {
+		return gripperConfig{}, fmt.Errorf("GetGripperConfig: %w", err)
+	}
+	if len(vals) < 3 {
+		return gripperConfig{}, fmt.Errorf("GetGripperConfig: expected at least 3 values, got %d: %q", len(vals), resp)
+	}
+	conf := gripperConfig{Company: vals[0], Device: vals[1], SoftwareVersion: vals[2]}
+	if len(vals) >= 4 {
+		conf.Bus, conf.HasBus = vals[3], true
+	}
+	return conf, nil
+}
+
+// actGripper sends ActGripper() (§7.1.3, CMD_ID 227). action is 0 to reset,
+// 1 to activate. Activation drives a physical homing motion that takes seconds;
+// callers must wait for it before issuing a move (see gripper.go's activate).
+func (c *commandClient) actGripper(ctx context.Context, index, action int) error {
+	data := fmt.Sprintf("ActGripper(%d,%d)", index, action)
+	resp, err := c.send(ctx, cmdIDActGripper, data)
+	if err != nil {
+		return err
+	}
+	return parseErrcode(resp)
+}
+
+// moveGripperParams mirrors manual Table 7-1-4 in field order.
+type moveGripperParams struct {
+	Index    int // clamp number
+	Pos      int // position percentage, 0-100
+	Vel      int // speed percentage, 0-100
+	Force    int // torque percentage, 0-100
+	MaxTime  int // max wait, 0-30000 ms
+	Block    int // 0 = block, 1 = non-block
+	Type     int // 0 = parallel, 1 = rotary
+	RotNum   float64
+	RotSpeed int
+	RotTorq  int
+}
+
+// formatMoveGripper renders p as the literal MoveGripper(...) command text, in
+// the exact 10-argument order of manual Table 7-1-4.
+func formatMoveGripper(p moveGripperParams) string {
+	return fmt.Sprintf("MoveGripper(%d,%d,%d,%d,%d,%d,%d,%g,%d,%d)",
+		p.Index, p.Pos, p.Vel, p.Force, p.MaxTime, p.Block, p.Type, p.RotNum, p.RotSpeed, p.RotTorq)
+}
+
+// moveGripper sends MoveGripper() (§7.1.4, CMD_ID 228). With Block=0 the
+// controller does not acknowledge until the fingers have stopped, so the
+// caller's context deadline must cover the motion, not just the queueing.
+func (c *commandClient) moveGripper(ctx context.Context, p moveGripperParams) error {
+	resp, err := c.send(ctx, cmdIDMoveGripper, formatMoveGripper(p))
+	if err != nil {
+		return err
+	}
+	return parseErrcode(resp)
+}
+
+// getRobotErrorCode sends GetRobotErrorCode() (§6.3.16, CMD_ID 1163) and
+// returns (mainCode, subCode). Its response has no leading errcode either.
+func (c *commandClient) getRobotErrorCode(ctx context.Context) (mainCode, subCode int, err error) {
+	resp, err := c.send(ctx, cmdIDGetRobotErrorCode, "GetRobotErrorCode()")
+	if err != nil {
+		return 0, 0, err
+	}
+	vals, err := parseIntList(resp)
+	if err != nil {
+		return 0, 0, fmt.Errorf("GetRobotErrorCode: %w", err)
+	}
+	if len(vals) < 2 {
+		return 0, 0, fmt.Errorf("GetRobotErrorCode: expected 2 values, got %d: %q", len(vals), resp)
+	}
+	return vals[0], vals[1], nil
+}
+
+// parseIntList parses a response DATA field holding a list of integers. The
+// manual's examples are inconsistent about the separator — GetRobotErrorCode
+// shows "0,0" while GetGripperConfig shows "30 00 00 00" — so both commas and
+// whitespace are accepted as separators.
+func parseIntList(data string) ([]int, error) {
+	fields := strings.FieldsFunc(strings.TrimSpace(data), func(r rune) bool {
+		return r == ',' || r == ' ' || r == '\t'
+	})
+	out := make([]int, 0, len(fields))
+	for _, f := range fields {
+		v, err := strconv.Atoi(f)
+		if err != nil {
+			return nil, fmt.Errorf("non-numeric value %q in response %q: %w", f, data, err)
+		}
+		out = append(out, v)
+	}
+	return out, nil
 }

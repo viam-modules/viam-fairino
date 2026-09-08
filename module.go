@@ -158,6 +158,11 @@ type viamFairinoFairino struct {
 	logger logging.Logger
 	cfg    *Config
 
+	// host is the resolved controller address (cfg.Host or the default). Kept
+	// separately because it is the key the shared status client is registered
+	// under — releasing with cfg.Host would miss the default-host case.
+	host string
+
 	// model is the selected robot's kinematic model, built once at
 	// construction time by kinematics.go's makeModelFrame (per conf.Model).
 	model referenceframe.Model
@@ -230,7 +235,15 @@ func NewFairino(ctx context.Context, deps resource.Dependencies, name resource.N
 		host = defaultHost
 	}
 
-	cmd := newCommandClient(host, commandPort, logger)
+	cmd := acquireCommandClient(host, commandPort, logger)
+	// Release the shared command client if construction fails before the
+	// resource takes ownership (its Close is what releases it thereafter).
+	cmdOwned := false
+	defer func() {
+		if !cmdOwned {
+			releaseCommandClient(host, commandPort)
+		}
+	}()
 
 	// Resolve the robot model. An explicit conf.Model wins (and lets the arm
 	// construct while the robot is unreachable); otherwise auto-detect it by
@@ -277,17 +290,17 @@ func NewFairino(ctx context.Context, deps resource.Dependencies, name resource.N
 		name:          name,
 		logger:        logger,
 		cfg:           conf,
+		host:          host,
 		model:         model,
 		meshVisualDir: assets.meshVisualDir,
 		motion:        motionSvc,
-		status:        newStatusClient(host, statusPort, logger),
+		status:        acquireStatusClient(ctx, host, statusPort, logger),
 		cmd:           cmd,
 		opMgr:         operation.NewSingleOperationManager(),
 		cancelCtx:     cancelCtx,
 		cancelFunc:    cancelFunc,
 	}
-	s.status.start(cancelCtx)
-
+	cmdOwned = true // s now owns cmd; its Close releases it
 	// Wait for the first status frame so early API calls don't race the
 	// connection; warn rather than fail so the resource can come up while the
 	// robot is off and recover via the reconnect loop.
@@ -629,8 +642,8 @@ func orDefaultInt(v, def int) int {
 }
 
 func (s *viamFairinoFairino) Close(context.Context) error {
-	s.status.stop()
-	_ = s.cmd.close()
+	releaseStatusClient(s.host, statusPort)
+	releaseCommandClient(s.host, commandPort)
 	s.cancelFunc()
 	return nil
 }
