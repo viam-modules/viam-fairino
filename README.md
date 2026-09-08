@@ -5,10 +5,11 @@ Viam `arm` component module for the Fairino FR5-WML collaborative robot.
 The module connects to the controller's status port (TCP 8083, fixed) for
 feedback and the command port (TCP 8080, fixed) for motion, and has a real
 kinematic model (`Kinematics`/`Geometries`/`Get3DModels`, including 3D-scene
-rendering in the Viam app). **The kinematic model's link lengths are
-CAD-corrected but its meshes and mass/inertia are still known-inaccurate
-placeholders**, pending the correct source files for this exact arm variant
-(FR5-WML). `Stop` remains unimplemented.
+rendering in the Viam app). See [PLAN.md](PLAN.md) for the detailed
+implementation history — in particular its STATUS section: **the kinematic
+model's link lengths are CAD-corrected but its meshes and mass/inertia are
+still known-inaccurate placeholders**, pending the correct source files for
+this exact arm variant (FR5-WML). `Stop` remains unimplemented.
 
 ## Cartesian motion (`MoveToPosition`) requires a `"frame"` config block
 
@@ -63,7 +64,8 @@ spaced.
 
 This module provides the following model(s):
 
-- [`viam-soleng:viam-fairino:fairino`](3a94d2f9082b44ad8569a9d8a1330050_viam-fairino_fairino.md) - Fairino FR5-WML arm
+- [`viam-soleng:viam-fairino:fairino`](viam-soleng_viam-fairino_fairino.md) - Fairino FR5-WML arm
+- `viam-soleng:viam-fairino:gripper` - Fairino-configured gripper (generic, percentage-based)
 
 ## Configuration
 
@@ -78,13 +80,61 @@ This module provides the following model(s):
 | `host` | string | no | Controller IP address. Defaults to `192.168.58.2` (the Fairino factory default). |
 | `tool_num` / `workpiece_num` | int | no | Active tool/workpiece coordinate frame, 0-14 each. Default 0 (no tool, base workpiece). |
 | `joint_speed_percent` | int | no | `MoveJ`'s speed field, 1-100. Default 20 (matches `fairino-python-sdk`'s own `MoveJ` default). |
-| `use_urdf` | bool | no | Use the on-disk URDF (`arm/fr5wml.urdf`) as the kinematics source instead of the default embedded JSON. Requires `VIAM_MODULE_ROOT` to be set (true for a normal deployment). JSON is the default because it's the only one the Viam app's joint-limit sliders currently parse correctly. |
+| `use_urdf` | bool | no | Use the on-disk URDF (`arm/fr5wml.urdf`) as the kinematics source instead of the default embedded JSON. Requires `VIAM_MODULE_ROOT` to be set (true for a normal deployment). See [PLAN.md](PLAN.md) Step 10 for why JSON is the default. |
 | `mesh_decimation_ratios` | []float | no | Only used when `use_urdf` is true; per-collision-mesh decimation ratios (document order). |
 | `motion` | string | no | Name of the `motion.Service` `MoveToPosition` delegates to. Defaults to this robot's `"builtin"` motion service if available (optional dependency); naming one explicitly makes it a hard dependency instead. See the Cartesian motion section above. |
 | `blend_time_ms` | int | no | `MoveJ`'s non-blocking `blendT` field, 0-500. Default 0 (disabled): every waypoint decelerates to a full stop before the next, the original behavior. A nonzero value blends through every waypoint but the last in a multi-waypoint move (`MoveThroughJointPositions`, and therefore `GoToInputs`/`MoveToPosition` too, since both delegate to it) instead of stopping at each — see the blending caveat below. |
 
 The controller's ports are fixed by firmware (status 8083, commands 8080) and
-are not configurable.
+are not configurable. Both the arm and the gripper speak only these two
+documented ports.
+
+### Gripper configuration
+
+```json
+{
+  "host": "192.168.58.2"
+}
+```
+
+| Attribute | Type | Required | Description |
+|---|---|---|---|
+| `host` | string | no | Controller IP. Defaults to `192.168.58.2`. |
+| `configure` | bool | no | Push `SetGripperConfig` at startup from the `company`/`device`/`software_version`/`bus` fields. Default false — the gripper is normally configured once on the controller. |
+| `company` / `device` / `software_version` / `bus` | int | no | Gripper identity codes, used only when `configure` is true. Read the current values with `DoCommand {"command": "gripper_config"}`. |
+| `activate` | bool | no | Call `ActGripper` at startup. Default true. |
+| `activate_wait_ms` | int | no | Wait after activation for its homing motion to finish before a move is accepted. Default 3000. |
+| `speed_percent` / `force_percent` | int | no | `MoveGripper` speed/torque, 0-100. Default 50 each. |
+| `max_time_ms` | int | no | `MoveGripper` timeout. Default 30000. |
+| `open_position` / `grab_position` | int | no | Positions used by `Open()`/`Grab()`, 0-100. Defaults 100 and 0. |
+| `stroke_mm` | float | no | Total finger travel, used to size the kinematic model. Default 145 (AG-105-145). |
+
+### Gripper bring-up on the controller
+
+The module cannot enable a gripper by itself — `SetGripperConfig` only records
+the vendor selection, it does not bring up the end-tool bus. Before any gripper
+command works, once per controller:
+
+1. WebApp → Peripherals → Gripper: select the vendor (for a DH Robotics gripper
+   choose **`dahuan`**; the dropdown order is robotiq, hitbot, tianji, dahuan,
+   zhixing, jodell, mt, rm).
+2. Enable the end-tool RS-485 peripheral protocol and **Activate**. A healthy DH
+   gripper performs a visible full open/close self-calibration when it
+   activates.
+3. If it reports "please reset the activated gripper" and software resets
+   (`ActGripper 0/1`, i.e. `DoCommand {"command": "activate"}`) don't clear it,
+   **power-cycle the gripper** — that latched fault needs a physical cycle.
+
+Until this is done, moves fail with controller errcode 73 ("gripper movement
+error"). The module retries once with a reset+activate before surfacing it.
+
+Diagnose with the bring-up CLI, which needs no running viam-server:
+
+```
+go run ./cmd/fairino-test -host <ip> gripper diag
+go run ./cmd/fairino-test -host <ip> gripper activate
+go run ./cmd/fairino-test -host <ip> gripper open|close|move <0-100>
+```
 
 ## Supported methods
 
@@ -113,6 +163,24 @@ state/name/lines, robot mode, fault code (human-readable), joint
 positions/torques, device-reported TCP pose, digital IO, force/torque sensor
 data, e-stop, motion-done, and frame diagnostics (`payload_len`,
 `frame_count`). Useful for bring-up and debugging.
+
+## Gripper methods
+
+| Method | Status |
+|---|---|
+| `Open` / `Grab` | ✅ blocking `MoveGripper` to the configured open/grab position |
+| `IsHoldingSomething` | ✅ from the status feed's `gripper_motion_done` (DH encoding: 2 = clamped, 3 = clamped then dropped) |
+| `CurrentInputs` / `Kinematics` / `Geometries` | ✅ fingers render at the live gripper position |
+| `GoToInputs` | ✅ maps finger travel back to a percentage |
+| `IsMoving` | ✅ true while an `Open`/`Grab` is in flight |
+| `Stop` | ⚠️ cancels the in-flight call; the controller has no gripper-stop command |
+| `DoCommand` | ✅ `gripper_config`, `status`, `activate`, `deactivate`, `set_config`, `move`, `diag` |
+
+Gripper *commands* go to port 8080 (manual chapter 7.1: `SetGripperConfig`,
+`GetGripperConfig`, `ActGripper`, `MoveGripper`); gripper *state* comes from the
+8083 status feed (Table 2-2 rows 41 and 56-63), which is where the controller
+publishes position, activation, fault, and motion-done. There is deliberately no
+gripper readback over the command port — it doesn't document any.
 
 ## Notes
 

@@ -7,22 +7,27 @@ import (
 	"go.viam.com/rdk/logging"
 )
 
-// wantLinkNames are the 7 links in arm/fr5wml.urdf (no flange/tool frame in
-// this URDF, unlike the earlier FR5WM.urdf-derived one — see PLAN.md
-// STATUS).
-var wantLinkNames = []string{
-	"base_link",
-	"shoulder_link",
-	"upperarm_link",
-	"forearm_link",
-	"wrist1_link",
-	"wrist2_link",
-	"wrist3_link",
+// wantLinkNames maps each model to the 7 links in its URDF that carry a visual
+// mesh. Both models' URDFs use the vendor's descriptive link names.
+// Get3DModels keys meshes by these names.
+var wantLinkNames = map[string][]string{
+	ModelFR5WML: {"base_link", "shoulder_link", "upperarm_link", "forearm_link", "wrist1_link", "wrist2_link", "wrist3_link"},
+	ModelFR5:    {"base_link", "shoulder_link", "upperarm_link", "forearm_link", "wrist1_link", "wrist2_link", "wrist3_link"},
+}
+
+// newTestArm builds a bare arm struct wired with the given model's visual-mesh
+// directory — enough to exercise Get3DModels without a full construction.
+func newTestArm(t *testing.T, model string) *viamFairinoFairino {
+	t.Helper()
+	return &viamFairinoFairino{
+		logger:        logging.NewTestLogger(t),
+		meshVisualDir: modelRegistry[model].meshVisualDir,
+	}
 }
 
 func TestGet3DModelsUnsetModuleRoot(t *testing.T) {
 	t.Setenv("VIAM_MODULE_ROOT", "")
-	s := &viamFairinoFairino{logger: logging.NewTestLogger(t)}
+	s := newTestArm(t, ModelFR5WML)
 
 	got, err := s.Get3DModels(context.Background(), nil)
 	if err != nil {
@@ -34,40 +39,45 @@ func TestGet3DModelsUnsetModuleRoot(t *testing.T) {
 }
 
 func TestGet3DModelsReturnsAllLinkMeshes(t *testing.T) {
-	t.Setenv("VIAM_MODULE_ROOT", ".")
-	s := &viamFairinoFairino{logger: logging.NewTestLogger(t)}
+	for _, model := range testModels {
+		t.Run(model, func(t *testing.T) {
+			t.Setenv("VIAM_MODULE_ROOT", ".")
+			s := newTestArm(t, model)
 
-	got, err := s.Get3DModels(context.Background(), nil)
-	if err != nil {
-		t.Fatalf("Get3DModels: %v", err)
-	}
-	if len(got) != len(wantLinkNames) {
-		t.Errorf("got %d meshes, want %d", len(got), len(wantLinkNames))
-	}
+			got, err := s.Get3DModels(context.Background(), nil)
+			if err != nil {
+				t.Fatalf("Get3DModels: %v", err)
+			}
+			want := wantLinkNames[model]
+			if len(got) != len(want) {
+				t.Errorf("got %d meshes, want %d", len(got), len(want))
+			}
 
-	for _, name := range wantLinkNames {
-		mesh, ok := got[name]
-		if !ok {
-			t.Errorf("missing mesh for link %q", name)
-			continue
-		}
-		if mesh.ContentType != "model/gltf-binary" {
-			t.Errorf("%s: content type = %q, want %q", name, mesh.ContentType, "model/gltf-binary")
-		}
-		if len(mesh.Mesh) < 4 {
-			t.Errorf("%s: mesh bytes too short (%d bytes) to be a valid glb", name, len(mesh.Mesh))
-			continue
-		}
-		// glTF binary files start with the magic 4-byte ASCII string "glTF".
-		if magic := string(mesh.Mesh[:4]); magic != "glTF" {
-			t.Errorf("%s: missing glTF magic header, got %q", name, magic)
-		}
+			for _, name := range want {
+				mesh, ok := got[name]
+				if !ok {
+					t.Errorf("missing mesh for link %q", name)
+					continue
+				}
+				if mesh.ContentType != "model/gltf-binary" {
+					t.Errorf("%s: content type = %q, want %q", name, mesh.ContentType, "model/gltf-binary")
+				}
+				if len(mesh.Mesh) < 4 {
+					t.Errorf("%s: mesh bytes too short (%d bytes) to be a valid glb", name, len(mesh.Mesh))
+					continue
+				}
+				// glTF binary files start with the magic 4-byte ASCII string "glTF".
+				if magic := string(mesh.Mesh[:4]); magic != "glTF" {
+					t.Errorf("%s: missing glTF magic header, got %q", name, magic)
+				}
+			}
+		})
 	}
 }
 
 func TestGet3DModelsCaches(t *testing.T) {
 	t.Setenv("VIAM_MODULE_ROOT", ".")
-	s := &viamFairinoFairino{logger: logging.NewTestLogger(t)}
+	s := newTestArm(t, ModelFR5WML)
 
 	first, err := s.Get3DModels(context.Background(), nil)
 	if err != nil {

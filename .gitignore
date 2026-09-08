@@ -32,3 +32,6 @@ bin
 # Viam reload files
 .VIAM_RELOAD_ARCHIVE.tar.gz
 reload-*/
+
+# stray go build output for the bring-up CLI
+/fairino-test

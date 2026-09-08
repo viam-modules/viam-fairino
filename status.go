@@ -245,3 +245,75 @@ func sleepCtx(ctx context.Context, d time.Duration) bool {
 		return true
 	}
 }
+
+// ---------------------------------------------------------------------------
+// Shared status clients
+//
+// The controller tolerates only one client on the status port at a time. On
+// real hardware a second connection attempt hangs while one is live, and even
+// after a client disconnects the controller never completes the close — the
+// socket sits in FIN_WAIT_2 and blocks the next connection for the better part
+// of a minute.
+//
+// That makes an independent status connection per resource unusable: an arm and
+// a gripper on the same controller would fight over the single slot, and
+// whichever lost would report a dead status feed. So resources share one reader
+// per host:port, reference-counted, started on the first acquire and stopped on
+// the last release. One connection, one reader goroutine, every resource
+// reading the same frames.
+// ---------------------------------------------------------------------------
+
+var (
+	sharedStatusMu      sync.Mutex
+	sharedStatusClients = map[string]*sharedStatusEntry{}
+)
+
+type sharedStatusEntry struct {
+	client *statusClient
+	refs   int
+}
+
+// acquireStatusClient returns the shared reader for host:port, starting it on
+// first use. Every acquire must be paired with a releaseStatusClient.
+func acquireStatusClient(ctx context.Context, host string, port int, logger logging.Logger) *statusClient {
+	key := net.JoinHostPort(host, strconv.Itoa(port))
+
+	sharedStatusMu.Lock()
+	defer sharedStatusMu.Unlock()
+
+	if e, ok := sharedStatusClients[key]; ok {
+		e.refs++
+		logger.Debugw("reusing shared status client", "addr", key, "refs", e.refs)
+		return e.client
+	}
+	// The reader outlives the acquiring resource's construction context, so it
+	// gets a background context; releaseStatusClient is what stops it.
+	c := newStatusClient(host, port, logger)
+	c.start(context.Background())
+	sharedStatusClients[key] = &sharedStatusEntry{client: c, refs: 1}
+	logger.Debugw("started shared status client", "addr", key)
+	return c
+}
+
+// releaseStatusClient drops one reference to the shared reader for host:port,
+// stopping it when the last resource using it goes away.
+func releaseStatusClient(host string, port int) {
+	key := net.JoinHostPort(host, strconv.Itoa(port))
+
+	sharedStatusMu.Lock()
+	e, ok := sharedStatusClients[key]
+	if !ok {
+		sharedStatusMu.Unlock()
+		return
+	}
+	e.refs--
+	if e.refs > 0 {
+		sharedStatusMu.Unlock()
+		return
+	}
+	delete(sharedStatusClients, key)
+	sharedStatusMu.Unlock()
+
+	// Stop outside the lock: it waits for the reader goroutine to exit.
+	e.client.stop()
+}

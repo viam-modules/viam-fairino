@@ -68,6 +68,55 @@ const (
 	minStatusPayloadLen = offMotionDone + 4
 )
 
+// Gripper payload offsets (manual Table 2-2 rows 41 and 56-63). These are the
+// realtime source for everything the gripper component reads back: the
+// controller publishes gripper state here, not over the command port, which is
+// why chapter 7's command set has no GetGripperMotionDone.
+//
+// The offsets are derived by walking Table 2-2's byte counts from row 41
+// (which starts right after robot_motion_done's int32):
+//
+//	41 gripper_motion_done  1 @233   50 exaxis_active_flag     1 @376
+//	42 servo_id             1 @234   51 exaxis_motion_status   1 @377
+//	43 servo_errcode        4 @235   52 cl_analog_input[2]     4 @378
+//	44 servo_state          4 @239   53 tl_analog_input        2 @382
+//	45 servo_actual_pos     8 @243   54 cl_analog_output[2]    4 @384
+//	46 servo_actual_speed   4 @251   55 tl_analog_output       2 @388
+//	47 servo_actual_torque  4 @255   56 gripper_fault_id       1 @390
+//	48 exaxis_out_slimit    1 @259   57 gripper_fault          2 @391
+//	49 exaxis_status[4]   116 @260   58 gripper_active         2 @393
+//	                                 59 gripper_position       1 @395
+//
+// Row 49's 116 bytes is 4 axes x the 29-byte Table 2-3 struct (8+8+4+9x1).
+const (
+	offGripperMotionDone = 233 // uint8, see gripperMotionDone* below
+	offGripperFaultID    = 390 // uint8, index of the faulted gripper
+	offGripperFault      = 391 // uint16
+	offGripperActive     = 393 // uint16, 0 = not activated
+	offGripperPosition   = 395 // uint8, 0-100%
+	offGripperSpeed      = 396 // int8, percent
+	offGripperCurrent    = 397 // int8, percent
+	offGripperTemp       = 398 // int32
+	offGripperVoltage    = 402 // int32
+
+	// minGripperPayloadLen is the end of the gripper field set. Frames shorter
+	// than this (older firmware, or a truncated table) still parse — the
+	// gripper fields are just marked invalid, so the arm keeps working.
+	minGripperPayloadLen = offGripperVoltage + 4
+)
+
+// gripper_motion_done values for DH/Dahuan grippers (Table 2-2 row 41). Each
+// vendor encodes this field differently; the AG-105-145 this module was brought
+// up against is a DH, and the DH column is the one implemented here. Robotiq
+// and Huiling/Tianji use different encodings — revisit if another vendor is
+// configured.
+const (
+	gripperMotionMoving  = 0 // movement not completed
+	gripperMotionStopped = 1 // stopped, object NOT clamped
+	gripperMotionClamped = 2 // stopped, object clamped
+	gripperMotionDropped = 3 // object was clamped and then dropped
+)
+
 // program_state values (Table 2-2 row 1).
 const (
 	programStateStop      = 1
@@ -148,6 +197,20 @@ type statusFrame struct {
 	EmergencyStop bool
 	MotionDone    bool // robot_motion_done == 1 ("in place")
 
+	// Gripper fields (Table 2-2 rows 41, 56-63). GripperValid is false when the
+	// payload was too short to contain them, in which case they are all zero
+	// and callers must not read them as real state.
+	GripperValid      bool
+	GripperMotionDone uint8 // see gripperMotion* constants (DH encoding)
+	GripperFaultID    uint8
+	GripperFault      uint16
+	GripperActive     uint16 // 0 = not activated
+	GripperPosition   uint8  // 0-100%
+	GripperSpeed      int8
+	GripperCurrent    int8
+	GripperTemp       int32
+	GripperVoltage    int32
+
 	// RawPayload is a copy of the full payload so the DoCommand status dump
 	// can decode fields the hot path doesn't, without re-reading the wire.
 	RawPayload []byte
@@ -179,6 +242,18 @@ func parseStatus(payload []byte, frameCount uint8) (statusFrame, bool) {
 		fr.TCPPose[i] = readF64(payload, offTCPPose+i*8)
 		fr.JointTorques[i] = readF64(payload, offJointTorque+i*8)
 	}
+	if len(payload) >= minGripperPayloadLen {
+		fr.GripperValid = true
+		fr.GripperMotionDone = payload[offGripperMotionDone]
+		fr.GripperFaultID = payload[offGripperFaultID]
+		fr.GripperFault = readU16(payload, offGripperFault)
+		fr.GripperActive = readU16(payload, offGripperActive)
+		fr.GripperPosition = payload[offGripperPosition]
+		fr.GripperSpeed = int8(payload[offGripperSpeed])
+		fr.GripperCurrent = int8(payload[offGripperCurrent])
+		fr.GripperTemp = readI32(payload, offGripperTemp)
+		fr.GripperVoltage = readI32(payload, offGripperVoltage)
+	}
 	return fr, true
 }
 
@@ -188,6 +263,10 @@ func readF64(buf []byte, off int) float64 {
 
 func readI32(buf []byte, off int) int32 {
 	return int32(binary.LittleEndian.Uint32(buf[off : off+4]))
+}
+
+func readU16(buf []byte, off int) uint16 {
+	return binary.LittleEndian.Uint16(buf[off : off+2])
 }
 
 // readCString returns the bytes up to the first NUL as a string.
@@ -219,6 +298,22 @@ const (
 	cmdIDMoveJ         = 201 // manual §2.1, Table 2-1
 	cmdIDStop          = 102 // manual §2.35, Table 2-48
 	cmdIDGetForwardKin = 377 // manual §6.3.24, Table 6-3-24
+
+	// Gripper commands, manual chapter 7.1 ("Robot peripheral instructions").
+	cmdIDSetGripperConfig = 226 // §7.1.1, Table 7-1-1
+	cmdIDActGripper       = 227 // §7.1.3, Table 7-1-3
+	cmdIDMoveGripper      = 228 // §7.1.4, Table 7-1-4
+	cmdIDGetGripperConfig = 229 // §7.1.2, Table 7-1-2
+
+	cmdIDGetRobotErrorCode = 1163 // §6.3.16, Table 6-3-16
+
+	// cmdIDGetSoftwareVersion sends "GetSoftwareVersion()"; the response DATA
+	// is "<robotModel>,<webVersion>,<controllerVersion>" (verified against an
+	// FR5 on real hardware: "FR5-V1-002(V6.0),v3.9.4,V3.9.22-QX"). robotModel
+	// drives model auto-detection (kinematics.go's modelFromRobotModel). Same
+	// CMD_ID the vendor SDK uses over this port — see fairino-python-sdk
+	// testUDP1.py's raw "/f/b...905...GetSoftwareVersion()...".
+	cmdIDGetSoftwareVersion = 905
 
 	// cmdIDScriptError is NOT documented anywhere in the manual — found on
 	// real hardware. When a command handler fails, the controller's response
