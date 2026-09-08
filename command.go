@@ -456,11 +456,9 @@ type moveJParams struct {
 
 	ExAxisPos [4]float64 // no external axes on this arm; always zero
 
-	// BlendT: -1 blocks (decelerates to a stop) at this point before any
-	// next queued motion; [0,500] is a non-blocking smooth-transition time
-	// in ms. MoveToJointPositions is a single discrete target, so this is
-	// always -1 — the block/no-block distinction only matters when chaining
-	// waypoints (MoveThroughJointPositions, not yet implemented).
+	// BlendT: -1 blocks (decelerate to a stop) at this waypoint; [0,500]
+	// is a non-blocking smooth-transition time in ms. See
+	// moveToJointPositionsOnce (module.go) for how it's chosen.
 	BlendT float64
 
 	OffsetFlag uint8      // 0 = no offset; always 0 here (no workpiece/tool offset support yet)

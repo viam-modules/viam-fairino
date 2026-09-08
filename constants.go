@@ -491,6 +491,24 @@ var cmdErrorNames = map[int]string{
 	193: "torque control speed exceeds limit",
 	194: "torque control power exceeds limit",
 	195: "FR30L base tilt angle must be 0",
+	196: "the photoelectric sensor signal has not been triggered",
+	197: "the joint torque sensor has not completed zero-point or sensitivity calibration",
+	198: "the joint torque sensor exhibits an anomaly",
+	199: "error in the interference range set for the multi-interference zone (multiple cubes can only be configured within the specified range)",
+	200: "the robot is operating in intermittent mode",
+	201: "swinging configuration file check failed",
+	202: "interference configuration file check failed",
+	203: "end 485 communication error",
+	// 204: MoveJ sent while the controller's motion queue is full (e.g.
+	// waypoints sent faster than it can drain). Surfaces as a normal MoveJ
+	// error; no retry/backoff is implemented for it.
+	204: "the instruction queue is full; check the instruction sending frequency",
+	205: "the endpoint protocol is configured; close it first",
+	206: "the adapted devices are configured; clear the current adapted devices first",
+	207: "automatic mode safe stop requires three-position enablement with the teaching device",
+	208: "the current DI configuration is occupied and cannot be changed",
+	209: "not in tracking mode",
+	210: "conveyor belt calibration error",
 }
 
 func cmdErrorString(code int) string {
