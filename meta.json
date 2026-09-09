@@ -3,7 +3,7 @@
   "module_id": "viam-soleng:viam-fairino",
   "visibility": "public",
   "url": "https://github.com/viam-soleng/viam-fairino",
-  "description": "Modular arm component: fairino",
+  "description": "Modular arm component for Fairino FR5 and FR5-WML",
   "applications": null,
   "markdown_link": "README.md",
   "entrypoint": "bin/viam-fairino",
