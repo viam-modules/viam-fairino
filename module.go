@@ -395,9 +395,12 @@ func (s *viamFairinoFairino) Status(ctx context.Context) (map[string]interface{}
 	}, nil
 }
 
-// DoCommand exposes the full decoded status for bring-up and debugging:
+// DoCommand exposes the full decoded status for bring-up and debugging, plus
+// drag-teach (free-drive) mode control:
 //
 //	{"command": "status"} → every Phase 1 field plus payload diagnostics.
+//	{"command": "enter_drag_mode"} → DragTeachSwitch(1)
+//	{"command": "exit_drag_mode"} → DragTeachSwitch(0).
 func (s *viamFairinoFairino) DoCommand(ctx context.Context, cmd map[string]interface{}) (map[string]interface{}, error) {
 	command, _ := cmd["command"].(string)
 	switch command {
@@ -407,8 +410,18 @@ func (s *viamFairinoFairino) DoCommand(ctx context.Context, cmd map[string]inter
 			return nil, err
 		}
 		return statusDump(fr), nil
+	case "enter_drag_mode":
+		if err := s.cmd.dragTeachSwitch(ctx, true); err != nil {
+			return nil, err
+		}
+		return map[string]interface{}{"ok": true}, nil
+	case "exit_drag_mode":
+		if err := s.cmd.dragTeachSwitch(ctx, false); err != nil {
+			return nil, err
+		}
+		return map[string]interface{}{"ok": true}, nil
 	default:
-		return nil, fmt.Errorf("unknown command %q (supported: \"status\")", command)
+		return nil, fmt.Errorf("unknown command %q (supported: \"status\", \"enter_drag_mode\", \"exit_drag_mode\")", command)
 	}
 }
 

@@ -631,6 +631,25 @@ func (c *commandClient) actGripper(ctx context.Context, index, action int) error
 	return parseErrcode(resp)
 }
 
+// dragTeachSwitch sends DragTeachSwitch(0|1) (CMD_ID 333 — see
+// cmdIDDragTeachSwitch's doc comment for why this isn't in the manual) to
+// enter (on=true) or exit (on=false) the controller's drag-teach
+// (free-drive) mode. Whether it's currently active is read back via the
+// status port instead of a dedicated query command — see
+// constants.go's robotModeDrag/programStateDrag and module.go's DoCommand.
+func (c *commandClient) dragTeachSwitch(ctx context.Context, on bool) error {
+	state := 0
+	if on {
+		state = 1
+	}
+	data := fmt.Sprintf("DragTeachSwitch(%d)", state)
+	resp, err := c.send(ctx, cmdIDDragTeachSwitch, data)
+	if err != nil {
+		return err
+	}
+	return parseErrcode(resp)
+}
+
 // moveGripperParams mirrors manual Table 7-1-4 in field order.
 type moveGripperParams struct {
 	Index    int // clamp number
