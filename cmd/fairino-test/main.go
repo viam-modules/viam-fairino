@@ -12,6 +12,7 @@
 //	status                       decoded arm status
 //	joints                       current joint positions (degrees)
 //	jog <joint 1-6> <deltaDeg>   move one joint by delta degrees (blocking MoveJ)
+//	drag on|off                  enter/exit drag-teach (free-drive) mode
 //
 //	gripper status               live gripper state from the 8083 status feed
 //	gripper config               configured company/device/software
@@ -65,7 +66,7 @@ func run(host string, args []string) error {
 	logger := logging.NewLogger("fairino-test")
 
 	switch args[0] {
-	case "status", "joints", "jog":
+	case "status", "joints", "jog", "drag":
 		return runArm(ctx, host, logger, args)
 	case "gripper":
 		return runGripper(ctx, host, logger, args[1:])
@@ -122,6 +123,24 @@ func runArm(ctx context.Context, host string, logger logging.Logger, args []stri
 			return err
 		}
 		return printJoints(ctx, a)
+
+	case "drag":
+		if len(args) != 2 || (args[1] != "on" && args[1] != "off") {
+			return fmt.Errorf("usage: drag on|off")
+		}
+		command := "enter_drag_mode"
+		if args[1] == "off" {
+			command = "exit_drag_mode"
+		}
+		if _, err := a.DoCommand(ctx, map[string]any{"command": command}); err != nil {
+			return err
+		}
+		st, err := a.DoCommand(ctx, map[string]any{"command": "status"})
+		if err != nil {
+			return err
+		}
+		fmt.Printf("robot_mode=%v program_state=%v\n", st["robot_mode"], st["program_state"])
+		return nil
 	}
 	return fmt.Errorf("unknown arm command %q", args[0])
 }

@@ -145,7 +145,7 @@ go run ./cmd/fairino-test -host <ip> gripper open|close|move <0-100>
 | `JointPositions` / `CurrentInputs` | ✅ live from the 8083 status stream |
 | `IsMoving` | ✅ from `robot_motion_done` (may not register pendant/drag motion yet) |
 | `Status` | ✅ connection health + decoded controller state |
-| `DoCommand` | ✅ `{"command": "status"}` (see below) |
+| `DoCommand` | ✅ `{"command": "status"}`, `"enter_drag_mode"`, `"exit_drag_mode"` (see below) |
 | `MoveToJointPositions` | ✅ single blocking `MoveJ` |
 | `MoveThroughJointPositions` | ✅ loops `MoveToJointPositions`' underlying mechanics per waypoint; blends through intermediate waypoints when `blend_time_ms` is set (see below) |
 | `MoveToPosition` | ✅ via a `motion.Service` (see the "frame" config requirement above) — IK-solved, self-collision-checked joint trajectory, never a direct Cartesian command to the controller |
@@ -165,6 +165,9 @@ state/name/lines, robot mode, fault code (human-readable), joint
 positions/torques, device-reported TCP pose, digital IO, force/torque sensor
 data, e-stop, motion-done, and frame diagnostics (`payload_len`,
 `frame_count`). Useful for bring-up and debugging.
+
+`{"command": "enter_drag_mode"}` / `{"command": "exit_drag_mode"}` toggle the
+controller's drag-teach (free-drive) mode. This uses an undocumented command
 
 ## Gripper methods
 
