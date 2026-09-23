@@ -972,6 +972,35 @@ func (s *viamFairinoFairino) Stop(ctx context.Context, extra map[string]interfac
 	return s.cmd.stop(ctx)
 }
 
+// errNotImplemented marks arm.Arm methods added in newer RDK versions that
+// this module doesn't support yet (see the CONSULT-2244 epic).
+var errNotImplemented = errors.New("not implemented yet for the Fairino arm")
+
+// Properties is not implemented yet.
+func (s *viamFairinoFairino) Properties(ctx context.Context, extra map[string]interface{}) (arm.Properties, error) {
+	return arm.Properties{}, errNotImplemented
+}
+
+// SetManualMode is not implemented yet.
+func (s *viamFairinoFairino) SetManualMode(ctx context.Context, on bool, enabledFor time.Duration, extra map[string]interface{}) error {
+	return errNotImplemented
+}
+
+// ManualMode is not implemented yet.
+func (s *viamFairinoFairino) ManualMode(ctx context.Context, extra map[string]interface{}) (bool, error) {
+	return false, errNotImplemented
+}
+
+// MoveThroughJointPositionsStreamed is not implemented yet.
+func (s *viamFairinoFairino) MoveThroughJointPositionsStreamed(
+	ctx context.Context,
+	batches <-chan []arm.TrajectoryPoint,
+	responses chan<- arm.Response,
+	extra map[string]interface{},
+) error {
+	return errNotImplemented
+}
+
 // Kinematics returns the selected model's kinematic model, built once at
 // construction time (kinematics.go's makeModelFrame) from the model's embedded
 // JSON (or on-disk URDF if Config.UseURDF is set).
