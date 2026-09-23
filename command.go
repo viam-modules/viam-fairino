@@ -911,6 +911,25 @@ func (c *commandClient) setAnticollision(ctx context.Context, owner string, leve
 	return c.applyOnEveryConnection(ctx, owner, cmdIDSetAnticollision, data)
 }
 
+// setDO sends SetDO() (§3.1.1, CMD_ID 204) for a control-box output, or
+// SetToolDO() (§3.1.4, CMD_ID 210) for a tool output. smooth=0 and
+// isNoBlock=0 are the vendor SDK's defaults.
+func (c *commandClient) setDO(ctx context.Context, tool bool, index int, on bool) error {
+	name, cmdID := "SetDO", cmdIDSetDO
+	if tool {
+		name, cmdID = "SetToolDO", cmdIDSetToolDO
+	}
+	state := 0
+	if on {
+		state = 1
+	}
+	resp, err := c.send(ctx, cmdID, fmt.Sprintf("%s(%d,%d,0,0)", name, index, state))
+	if err != nil {
+		return err
+	}
+	return parseErrcode(resp)
+}
+
 // getRobotErrorCode sends GetRobotErrorCode() (§6.3.16, CMD_ID 1163) and
 // returns (mainCode, subCode). Its response has no leading errcode either.
 func (c *commandClient) getRobotErrorCode(ctx context.Context) (mainCode, subCode int, err error) {

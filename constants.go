@@ -308,6 +308,8 @@ const (
 	cmdIDGetRobotErrorCode = 1163 // §6.3.16, Table 6-3-16
 
 	cmdIDSetAnticollision = 305 // §5.4.4, Table 5-4-4
+	cmdIDSetDO            = 204 // §3.1.1, Table 3-1-1
+	cmdIDSetToolDO        = 210 // §3.1.4, Table 3-1-3
 
 	// cmdIDGetSoftwareVersion sends "GetSoftwareVersion()"; the response DATA
 	// is "<robotModel>,<webVersion>,<controllerVersion>" (verified against an

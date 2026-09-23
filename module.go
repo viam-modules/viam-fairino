@@ -518,6 +518,11 @@ func (s *viamFairinoFairino) Status(ctx context.Context) (map[string]interface{}
 // drag-teach (free-drive) mode control:
 //
 //	{"command": "status"} → every Phase 1 field plus payload diagnostics.
+//	{"command": "get_state"} → program state, robot mode, motion done, e-stop, fault
+//	{"command": "get_error"} → fault code plus GetRobotErrorCode's main/sub codes
+//	{"command": "load"} → joint torques, N·m
+//	{"command": "set_do", "index": 0-15, "on": bool} → control-box digital output
+//	{"command": "set_tool_do", "index": 0-1, "on": bool} → tool digital output
 //	{"command": "set_speed", "speed_degs_per_sec": N} → default joint speed for later moves
 //	{"command": "get_speed"} → the current default joint speed
 //	{"command": "enter_drag_mode"} → DragTeachSwitch(1)
@@ -542,6 +547,16 @@ func (s *viamFairinoFairino) DoCommand(ctx context.Context, cmd map[string]inter
 		return map[string]interface{}{"speed_degs_per_sec": v}, nil
 	case "get_speed":
 		return map[string]interface{}{"speed_degs_per_sec": speedDegsFromPercent(s.currentSpeedPercent())}, nil
+	case "get_error":
+		return s.getError(ctx)
+	case "get_state":
+		return s.getState(ctx)
+	case "load":
+		return s.getLoad(ctx)
+	case "set_do":
+		return s.setDigitalOutput(ctx, cmd, false)
+	case "set_tool_do":
+		return s.setDigitalOutput(ctx, cmd, true)
 	case "enter_drag_mode":
 		if err := s.cmd.dragTeachSwitch(ctx, true); err != nil {
 			return nil, err
@@ -553,7 +568,8 @@ func (s *viamFairinoFairino) DoCommand(ctx context.Context, cmd map[string]inter
 		}
 		return map[string]interface{}{"ok": true}, nil
 	default:
-		return nil, fmt.Errorf("unknown command %q (supported: \"status\", \"set_speed\", \"get_speed\", \"enter_drag_mode\", \"exit_drag_mode\")", command)
+		return nil, fmt.Errorf("%w %q (supported: status, get_state, get_error, load, set_speed, get_speed, "+
+			"set_do, set_tool_do, enter_drag_mode, exit_drag_mode)", errUnknownCommand, command)
 	}
 }
 
