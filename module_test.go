@@ -32,3 +32,16 @@ func TestMoveToJointPositionsOnceRejectsZeroBlendT(t *testing.T) {
 		t.Error("blendT=0: expected an error, got nil")
 	}
 }
+
+func TestProperties(t *testing.T) {
+	props, err := (&viamFairinoFairino{}).Properties(context.Background(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !props.SupportCartesianCommands {
+		t.Error("SupportCartesianCommands should be true: MoveToPosition works via the motion service")
+	}
+	if props.SupportManualMode {
+		t.Error("SupportManualMode must stay false until SetManualMode is implemented")
+	}
+}

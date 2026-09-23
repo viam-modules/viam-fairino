@@ -976,9 +976,12 @@ func (s *viamFairinoFairino) Stop(ctx context.Context, extra map[string]interfac
 // this module doesn't support yet (see the CONSULT-2244 epic).
 var errNotImplemented = errors.New("not implemented yet for the Fairino arm")
 
-// Properties is not implemented yet.
+// Properties reports what this arm supports. Cartesian commands work via the
+// motion service (MoveToPosition). Manual mode is not reported yet: the
+// SetManualMode/ManualMode API isn't wired up (see RSDK-14463), although
+// drag-teach is reachable via DoCommand's enter_drag_mode/exit_drag_mode.
 func (s *viamFairinoFairino) Properties(ctx context.Context, extra map[string]interface{}) (arm.Properties, error) {
-	return arm.Properties{}, errNotImplemented
+	return arm.Properties{SupportCartesianCommands: true}, nil
 }
 
 // SetManualMode is not implemented yet.
