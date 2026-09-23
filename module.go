@@ -23,7 +23,9 @@
 // arm/fr5_SOURCES.md / arm/fr5wml_SOURCES.md for provenance); Geometries and
 // Get3DModels both use that same model and its bundled meshes. EndPosition
 // is implemented via forward kinematics (see its own doc comment for the
-// still-open design question).
+// still-open design question). Manual (drag-teach) mode is supported via
+// SetManualMode/ManualMode (manual_mode.go), which drive the controller's
+// DragTeachSwitch over the command port.
 //
 // The wire protocols use degrees and millimeters (constants.go/status.go/
 // command.go); all conversion to radians/SI happens in this file, at the
@@ -310,6 +312,8 @@ type viamFairinoFairino struct {
 	closed  bool // set by Close; later MoveToPosition calls are refused
 
 	closeOnce sync.Once
+
+	manualExit exitTimer // auto-exit for SetManualMode's enabledFor
 }
 
 func newViamFairinoFairino(ctx context.Context, deps resource.Dependencies, rawConf resource.Config, logger logging.Logger) (arm.Arm, error) {
@@ -613,12 +617,12 @@ func (s *viamFairinoFairino) DoCommand(ctx context.Context, cmd map[string]inter
 	case "set_tool_do":
 		return s.setDigitalOutput(ctx, cmd, true)
 	case "enter_drag_mode":
-		if err := s.cmd.dragTeachSwitch(ctx, true); err != nil {
+		if err := s.SetManualMode(ctx, true, 0, nil); err != nil {
 			return nil, err
 		}
 		return map[string]interface{}{"ok": true}, nil
 	case "exit_drag_mode":
-		if err := s.cmd.dragTeachSwitch(ctx, false); err != nil {
+		if err := s.SetManualMode(ctx, false, 0, nil); err != nil {
 			return nil, err
 		}
 		return map[string]interface{}{"ok": true}, nil
@@ -1028,6 +1032,7 @@ func orDefaultInt(v, def int) int {
 // resources on this controller, so a second release would take theirs.
 func (s *viamFairinoFairino) Close(ctx context.Context) error {
 	s.closeOnce.Do(func() {
+		s.manualExit.cancel()
 		s.cancelPlans(true)
 		s.opMgr.CancelRunning(ctx)
 		s.cmd.dropSetup(s.name.String())
@@ -1231,29 +1236,6 @@ func (s *viamFairinoFairino) Stop(ctx context.Context, extra map[string]interfac
 	ctx, done := s.opMgr.New(ctx)
 	defer done()
 	return s.cmd.stop(ctx)
-}
-
-// errNotImplemented marks arm.Arm methods added in newer RDK versions that
-// this module doesn't support yet (see the CONSULT-2244 epic).
-var errNotImplemented = errors.New("not implemented yet for the Fairino arm")
-
-// Properties reports what this arm supports. Cartesian commands work via the
-// motion service (MoveToPosition), so they are only reported when one is
-// available. Manual mode is not reported yet: the
-// SetManualMode/ManualMode API isn't wired up (see RSDK-14463), although
-// drag-teach is reachable via DoCommand's enter_drag_mode/exit_drag_mode.
-func (s *viamFairinoFairino) Properties(ctx context.Context, extra map[string]interface{}) (arm.Properties, error) {
-	return arm.Properties{SupportCartesianCommands: s.motion != nil}, nil
-}
-
-// SetManualMode is not implemented yet.
-func (s *viamFairinoFairino) SetManualMode(ctx context.Context, on bool, enabledFor time.Duration, extra map[string]interface{}) error {
-	return errNotImplemented
-}
-
-// ManualMode is not implemented yet.
-func (s *viamFairinoFairino) ManualMode(ctx context.Context, extra map[string]interface{}) (bool, error) {
-	return false, errNotImplemented
 }
 
 // Kinematics returns the selected model's kinematic model, built once at

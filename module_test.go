@@ -46,8 +46,8 @@ func TestProperties(t *testing.T) {
 	if props.SupportCartesianCommands {
 		t.Error("SupportCartesianCommands reported with no motion service: MoveToPosition would always fail")
 	}
-	if props.SupportManualMode {
-		t.Error("SupportManualMode must stay false until SetManualMode is implemented")
+	if !props.SupportManualMode {
+		t.Error("SupportManualMode not reported, though SetManualMode is implemented")
 	}
 	props, err = (&viamFairinoFairino{motion: &planningMotion{}}).Properties(context.Background(), nil)
 	if err != nil || !props.SupportCartesianCommands {

@@ -157,7 +157,8 @@ go run ./cmd/fairino-test -host <ip> gripper open|close|move <0-100>
 | `MoveToJointPositions` | ✅ single blocking `MoveJ` |
 | `MoveThroughJointPositions` | ✅ loops `MoveToJointPositions`' underlying mechanics per waypoint; blends through intermediate waypoints when `blend_time_ms` is set (see below) |
 | `MoveToPosition` | ✅ via a `motion.Service` (see the "frame" config requirement above) — IK-solved, self-collision-checked joint trajectory, never a direct Cartesian command to the controller |
-| `Properties` | ✅ Cartesian commands when a motion service is available; manual mode not yet |
+| `Properties` | ✅ manual mode; Cartesian commands when a motion service is available |
+| `SetManualMode` / `ManualMode` | ✅ drag-teach via `DragTeachSwitch`; entering it cancels any move in flight, and `enabled_for` exits it automatically after that long. `ManualMode` reads `robot_mode == drag` from the status stream, so it also reflects pendant/end-button toggles |
 | `GoToInputs` | ✅ delegates to `MoveThroughJointPositions` (this is what the motion service's plan executor actually calls) |
 | `MoveThroughJointPositionsStreamed` | ⚠️ experimental, not yet verified on hardware: one `ServoJ` setpoint per point, paced by the point's `Time`; points must be 1–16 ms apart (ServoJ's command-cycle range; so the motion service's streaming `send_to_arm_interval_ms` must be 16 or less). The first point must be within 0.01 rad of the arm's position, no step may imply more than the arm's 180°/s, and a fault, e-stop or lost status feed ends the stream. Late points keep their planned spacing. Stop, cancel or any error sends `STOP` |
 | `Kinematics` / `Geometries` / `Get3DModels` | ✅ real kinematic model (see the mesh/mass-inertia accuracy caveat above) |
@@ -218,7 +219,8 @@ Acceleration can't be set per move: `MoveJ`'s acceleration field is reserved
 on the controller.
 
 `{"command": "enter_drag_mode"}` / `{"command": "exit_drag_mode"}` toggle the
-controller's drag-teach (free-drive) mode. This uses an undocumented command
+controller's drag-teach (free-drive) mode, the same as `SetManualMode` with no
+`enabled_for` (and they cancel any pending auto-exit). This uses an undocumented command
 
 ## Force/torque sensor
 
