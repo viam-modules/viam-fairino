@@ -152,3 +152,56 @@ func TestJointTargetsValidatedBeforeSending(t *testing.T) {
 		})
 	}
 }
+
+func TestCloseStopsInFlightMove(t *testing.T) {
+	fc := newFakeController(t)
+	fc.setReply(fakeFKReply)
+	s, _ := newControllerTestArm(t, fc, movingFrame())
+	s.host = "127.0.0.1"
+
+	errCh := make(chan error, 1)
+	go func() { errCh <- s.MoveToJointPositions(context.Background(), testTarget(), nil) }()
+	waitFor(t, "MoveJ to be sent", func() bool { return fc.count("MoveJ") > 0 })
+
+	if err := s.Close(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-errCh:
+		if !errors.Is(err, context.Canceled) {
+			t.Errorf("move returned %v, want context.Canceled", err)
+		}
+	default:
+		t.Fatal("Close returned before the in-flight move did")
+	}
+	if fc.count("STOP") == 0 {
+		t.Errorf("no STOP sent on Close; commands %v", fc.sent())
+	}
+}
+
+// With nothing of ours moving, Close must not send STOP: the command client is
+// shared with the gripper and the arm may be under someone else's control.
+func TestCloseWhenIdleSendsNothing(t *testing.T) {
+	fc := newFakeController(t)
+	s, _ := newControllerTestArm(t, fc, restingFrame([6]float64{}))
+	s.host = "127.0.0.1"
+	if err := s.Close(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if sent := fc.sent(); len(sent) != 0 {
+		t.Errorf("idle Close sent %v", sent)
+	}
+}
+
+func TestSendRefusesCancelledContext(t *testing.T) {
+	fc := newFakeController(t)
+	s, _ := newControllerTestArm(t, fc, restingFrame([6]float64{}))
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := s.cmd.stop(ctx); !errors.Is(err, context.Canceled) {
+		t.Errorf("got %v, want context.Canceled", err)
+	}
+	if sent := fc.sent(); len(sent) != 0 {
+		t.Errorf("sent %v on a cancelled context", sent)
+	}
+}

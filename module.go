@@ -717,7 +717,14 @@ func orDefaultInt(v, def int) int {
 	return v
 }
 
-func (s *viamFairinoFairino) Close(context.Context) error {
+// Close cancels any move still in flight before releasing the controller
+// connections, so the arm doesn't keep executing it after the resource is
+// gone (e.g. on reconfigure). The cancelled move sends STOP on its way out,
+// and CancelRunning waits for that. With no move of ours running, nothing is
+// sent: the command client is shared with the gripper, and a STOP there is
+// only ours to send when we started the motion.
+func (s *viamFairinoFairino) Close(ctx context.Context) error {
+	s.opMgr.CancelRunning(ctx)
 	releaseStatusClient(s.host, statusPort)
 	releaseCommandClient(s.host, commandPort)
 	s.cancelFunc()
@@ -812,9 +819,9 @@ func (s *viamFairinoFairino) MoveThroughJointPositions(ctx context.Context, posi
 			blendT = float64(s.cfg.BlendTimeMs)
 		}
 		if err := s.moveToJointPositionsOnce(ctx, goal, blendT); err != nil {
-			if ctx.Err() != nil && blendT > 0 {
-				// Cancelled while sending a blended waypoint: the ones already
-				// acked are queued on the controller and would keep running.
+			if ctx.Err() != nil && i > 0 {
+				// Cancelled partway through: earlier waypoints may be queued
+				// on the controller (when blending) and would keep running.
 				s.stopDetached()
 			}
 			return fmt.Errorf("waypoint %d/%d: %w", i+1, len(positions), err)

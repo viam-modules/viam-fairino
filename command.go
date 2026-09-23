@@ -189,6 +189,12 @@ func (c *commandClient) send(ctx context.Context, cmdID int, data string) (strin
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
+	// A cancelled caller (e.g. a move that Stop just superseded) must not get
+	// one more command out, which the controller would then execute.
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
+
 	c.connMu.RLock()
 	conn := c.conn
 	c.connMu.RUnlock()
