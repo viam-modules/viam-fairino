@@ -67,6 +67,7 @@ This module provides the following model(s):
 - `viam-soleng:viam-fairino:fairino` - Fairino arm (FR5 or FR5-WML, auto-selected or selected by the `model` attribute)
 - `viam-soleng:viam-fairino:gripper` - Fairino-configured gripper (generic, percentage-based)
 - `viam-soleng:viam-fairino:ft_sensor` - wrist force/torque sensor (`sensor` API)
+- `viam-soleng:viam-fairino:vacuum_gripper` - vacuum gripper on the controller's digital IO
 
 ## Configuration
 
@@ -232,6 +233,23 @@ reports zeros, so `Readings` returns an error instead of zeros.
 | `{"command": "tare"}` | `FT_SetZero(1)`: zero at the current load. Hold the arm still at the unloaded reference pose first. |
 | `{"command": "clear_tare"}` | `FT_SetZero(0)`: remove the zero offset |
 | `{"command": "activate"}` / `{"command": "deactivate"}` | `FT_Activate(1/0)` |
+
+## Vacuum gripper
+
+```json
+{ "host": "192.168.58.2", "io": "tool", "suction_output": 0, "release_output": 1, "sensor_input": 0, "length_mm": 50 }
+```
+
+| Attribute | Type | Required | Description |
+|---|---|---|---|
+| `host` | string | no | Controller IP. Defaults to `192.168.58.2`. |
+| `io` | string | no | `"tool"` (flange IO, pins 0-1; default) or `"box"` (control-box IO, pins 0-15), for every pin below. |
+| `suction_output` | int | no | Output that turns suction on. Default 0. |
+| `release_output` | int | no | Output driven opposite to suction: off while grabbing, on while open (blow-off/release valve). |
+| `sensor_input` | int | no | Vacuum-switch input that is on while a part is held. `Grab` waits up to 1 s for it. Without it, `IsHoldingSomething` reports whether suction is on (`Meta.source` says which). |
+| `length_mm` | float | no | Adds a suction-cup collision box this long along Z. |
+
+`Close` leaves suction as it is, so a module restart doesn't drop a held part.
 
 ## Gripper methods
 
