@@ -911,6 +911,20 @@ func (c *commandClient) setAnticollision(ctx context.Context, owner string, leve
 	return c.applyOnEveryConnection(ctx, owner, cmdIDSetAnticollision, data)
 }
 
+// servoJ sends ServoJ() (§2.5, CMD_ID 376): move to jointsDeg over interval
+// seconds, the servo-mode setpoint a streamed trajectory is made of. No
+// external axes; acc/vel 0 (the manual's defaults); filterTime and posGain are
+// "temporarily unavailable", so 0.
+func (c *commandClient) servoJ(ctx context.Context, jointsDeg [6]float64, intervalSec float64) error {
+	data := fmt.Sprintf("ServoJ(%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,0,0,0,0,0,0,%.4f,0,0)",
+		jointsDeg[0], jointsDeg[1], jointsDeg[2], jointsDeg[3], jointsDeg[4], jointsDeg[5], intervalSec)
+	resp, err := c.send(ctx, cmdIDServoJ, data)
+	if err != nil {
+		return err
+	}
+	return parseErrcode(resp)
+}
+
 // setDO sends SetDO() (§3.1.1, CMD_ID 204) for a control-box output, or
 // SetToolDO() (§3.1.4, CMD_ID 210) for a tool output. smooth=0 is the vendor
 // SDK's default. isNoBlock is 1, not the SDK's default 0: a blocking IO
