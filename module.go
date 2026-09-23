@@ -122,6 +122,12 @@ type Config struct {
 	// stops fully, matching this module's pre-blending behavior. Range
 	// [0,500]; see README for the IK "cut corner" caveat.
 	BlendTimeMs int `json:"blend_time_ms,omitempty"`
+
+	// BadJoints lists joints (by index, 0-5) that can't move. Each is locked
+	// to about the position it reports at startup by narrowing its limits in
+	// the kinematics, so the motion service plans around it. Same as
+	// viam-ufactory-xarm's "bad-joints".
+	BadJoints []int `json:"bad_joints,omitempty"`
 }
 
 // Validate ensures all parts of the config are valid. Host is optional (it
@@ -159,6 +165,12 @@ func (cfg *Config) Validate(path string) ([]string, []string, error) {
 	}
 	if v := cfg.BlendTimeMs; v < 0 || v > 500 {
 		return nil, nil, fmt.Errorf("%s: blend_time_ms must be between 0 and 500, got %d", path, v)
+	}
+
+	for _, j := range cfg.BadJoints {
+		if j < 0 || j > 5 {
+			return nil, nil, fmt.Errorf("%s: bad_joints entries must be joint indices 0-5, got %d", path, j)
+		}
 	}
 
 	var deps, optionalDeps []string
@@ -294,14 +306,44 @@ func NewFairino(ctx context.Context, deps resource.Dependencies, name resource.N
 	if err != nil {
 		return nil, err
 	}
+
+	status := acquireStatusClient(ctx, host, statusPort, logger)
+	statusOwned := false
+	defer func() {
+		if !statusOwned {
+			releaseStatusClient(host, statusPort)
+		}
+	}()
+	// Wait for the first status frame so early API calls don't race the
+	// connection; warn rather than fail so the resource can come up while the
+	// robot is off and recover via the reconnect loop.
+	waitCtx, cancelWait := context.WithTimeout(ctx, 3*time.Second)
+	defer cancelWait()
+	firstFrame, frameErr := status.waitForFrame(waitCtx)
+	if frameErr != nil {
+		logger.CWarnw(ctx, "no initial status frame received", "host", host, "err", frameErr)
+	}
+
 	// Publish the configured default speed, not set_speed's runtime value:
 	// kinematics describe how the arm is configured, same as viam-ufactory-xarm.
-	if conf.UseURDF {
-		logger.CWarnw(ctx, "not publishing joint speed limits: use_urdf is set, and limits can only be written into JSON kinematics")
+	overrides := jointLimitOverrides{maxVelocityDegsPerSec: speedDegsFromPercent(conf.speedPercent())}
+	if len(conf.BadJoints) > 0 {
+		// A lock is only meaningful where the joint actually is, so this
+		// can't come up without a live position.
+		if frameErr != nil {
+			return nil, fmt.Errorf("bad_joints needs the arm's current joint positions at startup: %w", frameErr)
+		}
+		overrides.lockedDeg = map[int]float64{}
+		for _, j := range conf.BadJoints {
+			overrides.lockedDeg[j] = firstFrame.JointDegs[j]
+			logger.CInfow(ctx, "locking joint", "joint", j, "position_deg", firstFrame.JointDegs[j])
+		}
 	}
-	model, err = applyJointLimitOverrides(model, name.Name, jointLimitOverrides{
-		maxVelocityDegsPerSec: speedDegsFromPercent(conf.speedPercent()),
-	})
+	if conf.UseURDF {
+		logger.CWarnw(ctx, "not publishing joint speed limits or bad_joints locks: use_urdf is set, and limits can "+
+			"only be written into JSON kinematics. Locks still apply to this module's own joint-limit checks.")
+	}
+	model, err = applyJointLimitOverrides(model, name.Name, overrides)
 	if err != nil {
 		return nil, err
 	}
@@ -334,20 +376,12 @@ func NewFairino(ctx context.Context, deps resource.Dependencies, name resource.N
 		model:         model,
 		meshVisualDir: assets.meshVisualDir,
 		motion:        motionSvc,
-		status:        acquireStatusClient(ctx, host, statusPort, logger),
+		status:        status,
 		cmd:           cmd,
 		opMgr:         operation.NewSingleOperationManager(),
 	}
-	cmdOwned = true // s now owns cmd; its Close releases it
-	// Wait for the first status frame so early API calls don't race the
-	// connection; warn rather than fail so the resource can come up while the
-	// robot is off and recover via the reconnect loop.
-	waitCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
-	defer cancel()
-	if _, err := s.status.waitForFrame(waitCtx); err != nil {
-		logger.CWarnw(ctx, "no initial status frame received", "host", host, "err", err)
-	}
-
+	// s now owns cmd and status; its Close releases them.
+	cmdOwned, statusOwned = true, true
 	return s, nil
 }
 

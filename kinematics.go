@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 
@@ -132,25 +133,68 @@ type jointLimitOverrides struct {
 	// motion service plans at the speed the arm will actually move. 0 leaves
 	// the document's velocity limits alone.
 	maxVelocityDegsPerSec float64
+
+	// lockedDeg pins each listed joint (by index) to about its current
+	// position, in degrees, so plans never move it (Config.BadJoints).
+	lockedDeg map[int]float64
+}
+
+// lockedJointRangeDeg is the window a locked joint may move in: one degree of
+// slack either side of where it is, so IK doesn't fail outright on a joint
+// whose reported position drifts. Clamped to the joint's own range when it is
+// inside it, since a joint that failed against its stop would otherwise get a
+// bound the controller refuses; left alone when the joint reports a position
+// outside its range, because that is still where the arm really is. Same rule
+// as viam-ufactory-xarm's lockedJointRangeDegs.
+func lockedJointRangeDeg(nowDeg float64, joint referenceframe.JointConfig) (lo, hi float64) {
+	lo, hi = nowDeg-1, nowDeg+1
+	if nowDeg >= joint.Min && nowDeg <= joint.Max {
+		lo, hi = max(lo, joint.Min), min(hi, joint.Max)
+	}
+	return lo, hi
 }
 
 // applyJointLimitOverrides writes o into m's kinematics document and reparses
 // it. Writing into the document is the only way limits reach the motion service
 // and clients: RDK sends the document bytes, not the parsed model. Only the SVA
-// JSON source can carry them (URDF limits are RSDK-14232), so for a URDF model
-// this leaves m unchanged.
+// JSON source can carry them (URDF limits are RSDK-14232): for a URDF model,
+// locks still shape the model this module returns, so its own checks honor
+// them, but nothing is published — the caller warns about that.
 func applyJointLimitOverrides(m referenceframe.Model, name string, o jointLimitOverrides) (referenceframe.Model, error) {
 	cfg := m.ModelConfig()
-	if o.maxVelocityDegsPerSec <= 0 || cfg.OriginalFile != nil && cfg.OriginalFile.Extension == "urdf" {
+	for j := range o.lockedDeg {
+		if j < 0 || j >= len(cfg.Joints) {
+			return nil, fmt.Errorf("bad_joints index %d is out of range: the arm has %d joints (0-%d)", j, len(cfg.Joints), len(cfg.Joints)-1)
+		}
+	}
+
+	limits := make(map[string]referenceframe.JointLimits, len(cfg.Joints))
+	for i, joint := range cfg.Joints {
+		entry := referenceframe.JointLimits{}
+		if v := o.maxVelocityDegsPerSec; v > 0 && joint.Mimic == nil {
+			entry.MaxVelocity = &v
+		}
+		if now, ok := o.lockedDeg[i]; ok {
+			lo, hi := lockedJointRangeDeg(now, joint)
+			entry.Min, entry.Max = &lo, &hi
+		}
+		if entry != (referenceframe.JointLimits{}) {
+			limits[joint.ID] = entry
+		}
+	}
+	if len(limits) == 0 {
 		return m, nil
 	}
-	v := o.maxVelocityDegsPerSec
-	limits := make(map[string]referenceframe.JointLimits, len(cfg.Joints))
-	for _, joint := range cfg.Joints {
-		if joint.Mimic != nil {
-			continue
+
+	if cfg.OriginalFile != nil && cfg.OriginalFile.Extension == "urdf" {
+		local := *cfg
+		local.Joints = slices.Clone(cfg.Joints)
+		for i, joint := range local.Joints {
+			if entry, ok := limits[joint.ID]; ok && entry.Min != nil {
+				local.Joints[i].Min, local.Joints[i].Max = *entry.Min, *entry.Max
+			}
 		}
-		limits[joint.ID] = referenceframe.JointLimits{MaxVelocity: &v}
+		return local.ParseConfig(name)
 	}
 	patched, err := referenceframe.SetJointLimits(cfg, limits)
 	if err != nil {

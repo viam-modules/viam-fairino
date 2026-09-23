@@ -128,3 +128,72 @@ func TestJointSpeedPublishedInKinematics(t *testing.T) {
 		t.Errorf("patched model has %d DoF, want 6", len(m.DoF()))
 	}
 }
+
+func TestBadJointLockPublished(t *testing.T) {
+	m, err := makeModelFrame("test", ModelFR5, false, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m, err = applyJointLimitOverrides(m, "test", jointLimitOverrides{lockedDeg: map[int]float64{2: 30}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	reparsed, err := referenceframe.UnmarshalModelJSON(m.ModelConfig().OriginalFile.Bytes, "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i, limit := range reparsed.DoF() {
+		width := limit.Max - limit.Min
+		if i == 2 {
+			if math.Abs(width-2*math.Pi/180) > 1e-9 || math.Abs((limit.Max+limit.Min)/2-30*math.Pi/180) > 1e-9 {
+				t.Errorf("joint 2 not locked to 30±1°: [%v, %v] rad", limit.Min, limit.Max)
+			}
+		} else if width < math.Pi {
+			t.Errorf("joint %d narrowed to [%v, %v] rad but wasn't locked", i, limit.Min, limit.Max)
+		}
+	}
+}
+
+// With use_urdf the lock can't be published, but it must still shape the
+// model this module checks targets against.
+func TestBadJointLockAppliesToURDFModel(t *testing.T) {
+	t.Setenv("VIAM_MODULE_ROOT", ".")
+	m, err := makeModelFrame("test", ModelFR5, true, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m, err = applyJointLimitOverrides(m, "test", jointLimitOverrides{lockedDeg: map[int]float64{0: 10}, maxVelocityDegsPerSec: 36})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if limit := m.DoF()[0]; limit.Max-limit.Min > 2.01*math.Pi/180 {
+		t.Errorf("joint 0 not locked: [%v, %v] rad", limit.Min, limit.Max)
+	}
+}
+
+func TestLockedJointRangeDeg(t *testing.T) {
+	joint := referenceframe.JointConfig{Min: -175, Max: 175}
+	for _, tc := range []struct{ now, lo, hi float64 }{
+		{0, -1, 1},
+		{174.5, 173.5, 175}, // clamped to the joint's own stop
+		{176, 175, 177},     // already outside its range: left where it is
+	} {
+		lo, hi := lockedJointRangeDeg(tc.now, joint)
+		if lo != tc.lo || hi != tc.hi {
+			t.Errorf("now=%v: got [%v, %v] want [%v, %v]", tc.now, lo, hi, tc.lo, tc.hi)
+		}
+	}
+}
+
+func TestBadJointsRejectsBadIndex(t *testing.T) {
+	m, err := makeModelFrame("test", ModelFR5, false, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := applyJointLimitOverrides(m, "test", jointLimitOverrides{lockedDeg: map[int]float64{6: 0}}); err == nil {
+		t.Error("expected an error for joint index 6")
+	}
+	if _, _, err := (&Config{BadJoints: []int{-1}}).Validate("path"); err == nil {
+		t.Error("Validate: expected an error for joint index -1")
+	}
+}
