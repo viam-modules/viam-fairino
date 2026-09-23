@@ -294,6 +294,17 @@ func NewFairino(ctx context.Context, deps resource.Dependencies, name resource.N
 	if err != nil {
 		return nil, err
 	}
+	// Publish the configured default speed, not set_speed's runtime value:
+	// kinematics describe how the arm is configured, same as viam-ufactory-xarm.
+	if conf.UseURDF {
+		logger.CWarnw(ctx, "not publishing joint speed limits: use_urdf is set, and limits can only be written into JSON kinematics")
+	}
+	model, err = applyJointLimitOverrides(model, name.Name, jointLimitOverrides{
+		maxVelocityDegsPerSec: speedDegsFromPercent(conf.speedPercent()),
+	})
+	if err != nil {
+		return nil, err
+	}
 	// modelName is either validated (Validate) or came from detectModel, so
 	// this lookup can't miss.
 	assets := modelRegistry[modelName]

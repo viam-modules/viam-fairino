@@ -124,3 +124,37 @@ func makeModelFrame(name, model string, useURDF bool, meshDecimationRatios []flo
 	}
 	return m, nil
 }
+
+// jointLimitOverrides are the limits this module writes into its kinematics on
+// top of the model's own position limits.
+type jointLimitOverrides struct {
+	// maxVelocityDegsPerSec is published as every joint's max_velocity, so the
+	// motion service plans at the speed the arm will actually move. 0 leaves
+	// the document's velocity limits alone.
+	maxVelocityDegsPerSec float64
+}
+
+// applyJointLimitOverrides writes o into m's kinematics document and reparses
+// it. Writing into the document is the only way limits reach the motion service
+// and clients: RDK sends the document bytes, not the parsed model. Only the SVA
+// JSON source can carry them (URDF limits are RSDK-14232), so for a URDF model
+// this leaves m unchanged.
+func applyJointLimitOverrides(m referenceframe.Model, name string, o jointLimitOverrides) (referenceframe.Model, error) {
+	cfg := m.ModelConfig()
+	if o.maxVelocityDegsPerSec <= 0 || cfg.OriginalFile != nil && cfg.OriginalFile.Extension == "urdf" {
+		return m, nil
+	}
+	v := o.maxVelocityDegsPerSec
+	limits := make(map[string]referenceframe.JointLimits, len(cfg.Joints))
+	for _, joint := range cfg.Joints {
+		if joint.Mimic != nil {
+			continue
+		}
+		limits[joint.ID] = referenceframe.JointLimits{MaxVelocity: &v}
+	}
+	patched, err := referenceframe.SetJointLimits(cfg, limits)
+	if err != nil {
+		return nil, fmt.Errorf("setting joint limits: %w", err)
+	}
+	return patched.ParseConfig(name)
+}

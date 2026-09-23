@@ -103,3 +103,28 @@ func TestJSONURDFForwardKinematicsAgree(t *testing.T) {
 		})
 	}
 }
+
+// The joint speed must reach the kinematics document, since that document is
+// what the motion service and clients see.
+func TestJointSpeedPublishedInKinematics(t *testing.T) {
+	m, err := makeModelFrame("test", ModelFR5, false, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m, err = applyJointLimitOverrides(m, "test", jointLimitOverrides{maxVelocityDegsPerSec: 36})
+	if err != nil {
+		t.Fatal(err)
+	}
+	reparsed, err := referenceframe.UnmarshalModelJSON(m.ModelConfig().OriginalFile.Bytes, "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, joint := range reparsed.ModelConfig().Joints {
+		if joint.MaxVelocity == nil || *joint.MaxVelocity != 36 {
+			t.Errorf("joint %s: max_velocity %v, want 36", joint.ID, joint.MaxVelocity)
+		}
+	}
+	if len(m.DoF()) != 6 {
+		t.Errorf("patched model has %d DoF, want 6", len(m.DoF()))
+	}
+}
