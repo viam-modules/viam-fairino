@@ -183,6 +183,18 @@ positions/torques, device-reported TCP pose, digital IO, force/torque sensor
 data, e-stop, motion-done, and frame diagnostics (`payload_len`,
 `frame_count`). Useful for bring-up and debugging.
 
+| Command | Result |
+|---|---|
+| `{"command": "get_state"}` | program state, robot mode, motion done, e-stop, fault, and whether a move of ours is running |
+| `{"command": "get_error"}` | the status frame's fault plus `GetRobotErrorCode`'s `main_code`/`sub_code` |
+| `{"command": "load"}` | joint torques, N·m (viam-ufactory-xarm's `load`) |
+| `{"command": "set_do", "index": 0-15, "on": true}` | set a control-box digital output (`SetDO`) |
+| `{"command": "set_tool_do", "index": 0-1, "on": true}` | set a tool digital output (`SetToolDO`) |
+
+Output states read back through `status` (`cl_dgt_output_h/l`, `tl_dgt_output_l`).
+There is no `clear_error` yet: the documented protocol has no fault-clearing
+command (see CONSULT-2249).
+
 `{"command": "set_speed", "speed_degs_per_sec": 45}` changes the default joint
 speed for later moves (until the next reconfigure), in [1.8, 180];
 `{"command": "get_speed"}` returns it.
