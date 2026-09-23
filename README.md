@@ -115,6 +115,7 @@ documented ports.
 | `max_time_ms` | int | no | `MoveGripper` timeout. Default 30000. |
 | `open_position` / `grab_position` | int | no | Positions used by `Open()`/`Grab()`, 0-100. Defaults 100 and 0. |
 | `stroke_mm` | float | no | Total finger travel, used to size the kinematic model. Default 145 (AG-105-145). |
+| `vendor` | string | no | How to decode the status feed's `gripper_motion_done` for hold detection: `"dh"` (DH/Dahuan, default), `"robotiq"` (holding = stopped on an object while opening or closing), or `"huiling"` (also Tianji; reports only moving/done, so `IsHoldingSomething` is always false with `Meta.hold_detection: false`). |
 
 ### Gripper bring-up on the controller
 
@@ -256,12 +257,19 @@ reports zeros, so `Readings` returns an error instead of zeros.
 | Method | Status |
 |---|---|
 | `Open` / `Grab` | ✅ `MoveGripper` to the configured open/grab position, waiting on the status feed until the fingers stop |
-| `IsHoldingSomething` | ✅ from the status feed's `gripper_motion_done` (DH encoding: 2 = clamped, 3 = clamped then dropped) |
+| `IsHoldingSomething` | ✅ from the status feed's `gripper_motion_done`, decoded per `vendor` (DH: 2 = clamped, 3 = clamped then dropped) |
 | `CurrentInputs` / `Kinematics` / `Geometries` | ✅ fingers render at the live gripper position |
 | `GoToInputs` | ✅ maps finger travel back to a percentage |
 | `IsMoving` | ✅ true while an `Open`/`Grab` is in flight |
 | `Stop` | ⚠️ cancels the in-flight call; the controller has no gripper-stop command |
-| `DoCommand` | ✅ `gripper_config`, `status`, `activate`, `deactivate`, `set_config`, `move`, `diag` |
+| `DoCommand` | ✅ `gripper_config`, `status`, `activate`, `deactivate`, `set_config`, `move`, `diag`, `set_speed_force`, `get_speed_force`, `grab_with_force` (see below) |
+
+`{"command": "set_speed_force", "speed_percent": 30, "force_percent": 80}`
+changes the default speed and/or force for later moves; `get_speed_force`
+returns them. `{"command": "grab_with_force", "position": 0, "speed_percent":
+30, "force_percent": 90}` grabs once at that speed/force without changing the
+defaults (every key optional) and returns `holding` — the counterpart of
+viam-ufactory-xarm's `grab_with_torque`.
 
 `MoveGripper` is sent non-blocking and followed on the status feed: a
 blocking one isn't acknowledged until the fingers stop, and would hold the
