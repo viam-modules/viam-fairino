@@ -792,6 +792,20 @@ func (c *commandClient) moveGripper(ctx context.Context, p moveGripperParams) er
 	return c.sendAck(ctx, cmdIDMoveGripper, formatMoveGripper(p))
 }
 
+// setAnticollision sends SetAnticollision() (§5.4.4, CMD_ID 305) with
+// per-joint collision levels, 1 (most sensitive) to 10. configFlag is 0 so the
+// controller's saved configuration is left alone: the module reapplies the
+// levels every time it starts instead.
+func (c *commandClient) setAnticollision(ctx context.Context, levels [6]int) error {
+	data := fmt.Sprintf("SetAnticollision(0,{%d,%d,%d,%d,%d,%d},0)",
+		levels[0], levels[1], levels[2], levels[3], levels[4], levels[5])
+	resp, err := c.send(ctx, cmdIDSetAnticollision, data)
+	if err != nil {
+		return err
+	}
+	return parseErrcode(resp)
+}
+
 // getRobotErrorCode sends GetRobotErrorCode() (§6.3.16, CMD_ID 1163) and
 // returns (mainCode, subCode). Its response has no leading errcode either.
 func (c *commandClient) getRobotErrorCode(ctx context.Context) (mainCode, subCode int, err error) {

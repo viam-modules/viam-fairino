@@ -128,6 +128,30 @@ type Config struct {
 	// the kinematics, so the motion service plans around it. Same as
 	// viam-ufactory-xarm's "bad-joints".
 	BadJoints []int `json:"bad_joints,omitempty"`
+
+	// CollisionLevel sets every joint's collision detection level at startup
+	// (SetAnticollision), 1 (most sensitive) to 10 — the controller's own
+	// scale, which runs the opposite way to viam-ufactory-xarm's 0-5.
+	// CollisionLevels sets them per joint instead (6 values); set at most one.
+	// Unset leaves the controller's configured levels alone.
+	CollisionLevel  int   `json:"collision_level,omitempty"`
+	CollisionLevels []int `json:"collision_levels,omitempty"`
+}
+
+// collisionLevels resolves CollisionLevel/CollisionLevels to per-joint levels;
+// ok is false when neither is set.
+func (cfg *Config) collisionLevels() (levels [6]int, ok bool) {
+	switch {
+	case cfg.CollisionLevel != 0:
+		for i := range levels {
+			levels[i] = cfg.CollisionLevel
+		}
+		return levels, true
+	case len(cfg.CollisionLevels) == 6:
+		copy(levels[:], cfg.CollisionLevels)
+		return levels, true
+	}
+	return levels, false
 }
 
 // Validate ensures all parts of the config are valid. Host is optional (it
@@ -170,6 +194,22 @@ func (cfg *Config) Validate(path string) ([]string, []string, error) {
 	for _, j := range cfg.BadJoints {
 		if j < 0 || j > 5 {
 			return nil, nil, fmt.Errorf("%s: bad_joints entries must be joint indices 0-5, got %d", path, j)
+		}
+	}
+
+	if cfg.CollisionLevel != 0 && len(cfg.CollisionLevels) > 0 {
+		return nil, nil, fmt.Errorf("%s: set at most one of collision_level and collision_levels", path)
+	}
+	if n := len(cfg.CollisionLevels); n != 0 && n != 6 {
+		return nil, nil, fmt.Errorf("%s: collision_levels needs 6 values, one per joint, got %d", path, n)
+	}
+	levels := cfg.CollisionLevels
+	if cfg.CollisionLevel != 0 {
+		levels = []int{cfg.CollisionLevel}
+	}
+	for _, v := range levels {
+		if v < 1 || v > 10 {
+			return nil, nil, fmt.Errorf("%s: collision levels must be between 1 and 10, got %d", path, v)
 		}
 	}
 
@@ -380,6 +420,15 @@ func NewFairino(ctx context.Context, deps resource.Dependencies, name resource.N
 		cmd:           cmd,
 		opMgr:         operation.NewSingleOperationManager(),
 	}
+	// Applied at every startup rather than saved on the controller, so a
+	// failure here is an error: the arm must not run at a sensitivity other
+	// than the one configured.
+	if levels, ok := conf.collisionLevels(); ok {
+		if err := cmd.setAnticollision(ctx, levels); err != nil {
+			return nil, fmt.Errorf("setting collision levels %v: %w", levels, err)
+		}
+	}
+
 	// s now owns cmd and status; its Close releases them.
 	cmdOwned, statusOwned = true, true
 	return s, nil

@@ -95,3 +95,48 @@ func TestStopAndCloseCancelPlanning(t *testing.T) {
 		})
 	}
 }
+
+func TestValidateCollisionLevels(t *testing.T) {
+	for _, cfg := range []Config{
+		{CollisionLevel: 11},
+		{CollisionLevel: -1},
+		{CollisionLevels: []int{1, 2, 3}},
+		{CollisionLevels: []int{1, 2, 3, 4, 5, 0}},
+		{CollisionLevel: 3, CollisionLevels: []int{1, 1, 1, 1, 1, 1}},
+	} {
+		if _, _, err := cfg.Validate("path"); err == nil {
+			t.Errorf("%+v: expected an error", cfg)
+		}
+	}
+	for _, cfg := range []Config{{CollisionLevel: 1}, {CollisionLevels: []int{1, 2, 3, 4, 5, 10}}} {
+		if _, _, err := cfg.Validate("path"); err != nil {
+			t.Errorf("%+v: %v", cfg, err)
+		}
+	}
+}
+
+func TestCollisionLevelsResolve(t *testing.T) {
+	if _, ok := (&Config{}).collisionLevels(); ok {
+		t.Error("unset config should leave the controller's levels alone")
+	}
+	if got, _ := (&Config{CollisionLevel: 4}).collisionLevels(); got != [6]int{4, 4, 4, 4, 4, 4} {
+		t.Errorf("collision_level: got %v", got)
+	}
+	if got, _ := (&Config{CollisionLevels: []int{1, 2, 3, 4, 5, 6}}).collisionLevels(); got != [6]int{1, 2, 3, 4, 5, 6} {
+		t.Errorf("collision_levels: got %v", got)
+	}
+}
+
+// The wire format must match the manual's example shape (Table 5-4-4).
+func TestSetAnticollisionFormat(t *testing.T) {
+	fc := newFakeController(t)
+	s, _ := newControllerTestArm(t, fc, restingFrame([6]float64{}))
+	if err := s.cmd.setAnticollision(context.Background(), [6]int{5, 5, 5, 5, 5, 3}); err != nil {
+		t.Fatal(err)
+	}
+	fc.mu.Lock()
+	defer fc.mu.Unlock()
+	if want := "SetAnticollision(0,{5,5,5,5,5,3},0)"; len(fc.commands) != 1 || fc.commands[0] != want {
+		t.Errorf("got %v want [%s]", fc.commands, want)
+	}
+}

@@ -307,6 +307,8 @@ const (
 
 	cmdIDGetRobotErrorCode = 1163 // §6.3.16, Table 6-3-16
 
+	cmdIDSetAnticollision = 305 // §5.4.4, Table 5-4-4
+
 	// cmdIDGetSoftwareVersion sends "GetSoftwareVersion()"; the response DATA
 	// is "<robotModel>,<webVersion>,<controllerVersion>" (verified against an
 	// FR5 on real hardware: "FR5-V1-002(V6.0),v3.9.4,V3.9.22-QX"). robotModel
