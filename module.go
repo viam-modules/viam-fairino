@@ -136,6 +136,15 @@ type Config struct {
 	// Unset leaves the controller's configured levels alone.
 	CollisionLevel  int   `json:"collision_level,omitempty"`
 	CollisionLevels []int `json:"collision_levels,omitempty"`
+
+	// WebAppProxy starts a local reverse proxy to the controller's WebApp on
+	// WebAppProxyPort (default 18080), for when the browser can't reach the
+	// controller directly. No authentication: anyone who can reach the port
+	// can drive the arm. WebAppURL overrides the target (default
+	// https://<host>).
+	WebAppProxy     bool   `json:"webapp_proxy,omitempty"`
+	WebAppProxyPort int    `json:"webapp_proxy_port,omitempty"`
+	WebAppURL       string `json:"webapp_url,omitempty"`
 }
 
 // collisionLevels resolves CollisionLevel/CollisionLevels to per-joint levels;
@@ -212,6 +221,13 @@ func (cfg *Config) Validate(path string) ([]string, []string, error) {
 		}
 	}
 
+	if v := cfg.WebAppProxyPort; v < 0 || v > 65535 {
+		return nil, nil, fmt.Errorf("%s: webapp_proxy_port must be a TCP port, got %d", path, v)
+	}
+	if _, err := webAppProxyTarget(cfg.WebAppURL, "controller"); err != nil {
+		return nil, nil, fmt.Errorf("%s: %w", path, err)
+	}
+
 	var deps, optionalDeps []string
 	if cfg.Motion != "" {
 		deps = append(deps, motion.Named(cfg.Motion).String())
@@ -262,6 +278,8 @@ type viamFairinoFairino struct {
 	// percentage; zero means "use the configured speed" (see speed.go).
 	speedMu  sync.Mutex
 	speedPct float64
+
+	webApp *webAppProxy // nil unless Config.WebAppProxy
 
 	// plans holds the cancel funcs of in-flight MoveToPosition calls, which
 	// hold no operation of their own (see MoveToPosition), so that Stop and
@@ -435,6 +453,20 @@ func NewFairino(ctx context.Context, deps resource.Dependencies, name resource.N
 	if levels, ok := conf.collisionLevels(); ok {
 		if err := cmd.setAnticollision(ctx, name.String(), levels); err != nil {
 			return nil, fmt.Errorf("setting collision levels %v: %w", levels, err)
+		}
+	}
+
+	if conf.WebAppProxy {
+		target, err := webAppProxyTarget(conf.WebAppURL, host)
+		if err != nil {
+			return nil, err
+		}
+		port := conf.WebAppProxyPort
+		if port == 0 {
+			port = defaultWebAppProxyPort
+		}
+		if s.webApp, err = startWebAppProxy(ctx, target, port, logger); err != nil {
+			return nil, err
 		}
 	}
 
@@ -980,6 +1012,7 @@ func (s *viamFairinoFairino) Close(ctx context.Context) error {
 		s.cancelPlans(true)
 		s.opMgr.CancelRunning(ctx)
 		s.cmd.dropSetup(s.name.String())
+		s.webApp.stop()
 		releaseStatusClient(s.host, statusPort)
 		releaseCommandClient(s.host, commandPort)
 	})
