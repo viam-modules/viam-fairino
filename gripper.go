@@ -95,6 +95,12 @@ type GripperConfig struct {
 	// open/closed in the 3D scene. Defaults to 145 (the AG-105-145); set it for
 	// other grippers.
 	StrokeMM float64 `json:"stroke_mm,omitempty"`
+
+	// Vendor selects how the status feed's gripper_motion_done is decoded for
+	// hold detection — each vendor encodes it differently (8083 manual Table
+	// 2-2 row 41): "dh" (DH/Dahuan, the default), "robotiq", or "huiling"
+	// (also Tianji), which reports only moving/done and so can't detect a hold.
+	Vendor string `json:"vendor,omitempty"`
 }
 
 // Validate checks ranges. No dependencies.
@@ -103,6 +109,12 @@ func (cfg *GripperConfig) Validate(path string) ([]string, []string, error) {
 		if v < 0 || v > 100 {
 			return nil, nil, fmt.Errorf("%s: %s must be between 0 and 100, got %d", path, name, v)
 		}
+	}
+	switch cfg.Vendor {
+	case "", gripperVendorDH, gripperVendorRobotiq, gripperVendorHuiling:
+	default:
+		return nil, nil, fmt.Errorf("%s: vendor must be %q, %q or %q, got %q", path,
+			gripperVendorDH, gripperVendorRobotiq, gripperVendorHuiling, cfg.Vendor)
 	}
 	for name, p := range map[string]*int{"open_position": cfg.OpenPosition, "grab_position": cfg.GrabPosition} {
 		if p != nil && (*p < 0 || *p > 100) {
@@ -147,8 +159,12 @@ type fairinoGripper struct {
 	model    referenceframe.Model
 	strokeMM float64
 
-	speed        int
-	force        int
+	vendor string
+
+	paramMu sync.Mutex // guards speed and force, which DoCommand can change
+	speed   int
+	force   int
+
 	maxTime      int
 	openPos      int
 	grabPos      int
@@ -198,6 +214,7 @@ func NewFairinoGripper(ctx context.Context, name resource.Name, conf *GripperCon
 		opMgr:        operation.NewSingleOperationManager(),
 		model:        model,
 		strokeMM:     strokeMM,
+		vendor:       conf.Vendor,
 		speed:        valueOr(conf.SpeedPercent, 50),
 		force:        valueOr(conf.ForcePercent, 50),
 		maxTime:      valueOr(conf.MaxTimeMs, 30000),
@@ -264,7 +281,20 @@ func (g *fairinoGripper) activate(ctx context.Context, reset bool) error {
 // is not activated/ready; we reset+re-activate it once and retry, since this
 // happens when the gripper wasn't activated in time or dropped out.
 func (g *fairinoGripper) moveGripper(ctx context.Context, pos int) error {
-	err := g.moveGripperOnce(ctx, pos)
+	speed, force := g.speedForce()
+	return g.moveGripperWith(ctx, pos, speed, force)
+}
+
+func (g *fairinoGripper) speedForce() (speed, force int) {
+	g.paramMu.Lock()
+	defer g.paramMu.Unlock()
+	return g.speed, g.force
+}
+
+// moveGripperWith moves to pos at the given speed/force (0-100 each),
+// re-activating and retrying once on errcode 73.
+func (g *fairinoGripper) moveGripperWith(ctx context.Context, pos, speed, force int) error {
+	err := g.moveGripperOnce(ctx, pos, speed, force)
 	if !isControllerErrcode(err, errcodeGripperMove) {
 		return err
 	}
@@ -272,7 +302,7 @@ func (g *fairinoGripper) moveGripper(ctx context.Context, pos int) error {
 	if aerr := g.activate(ctx, true); aerr != nil {
 		g.logger.CWarnw(ctx, "gripper re-activation failed", "err", aerr)
 	}
-	err = g.moveGripperOnce(ctx, pos)
+	err = g.moveGripperOnce(ctx, pos, speed, force)
 	if isControllerErrcode(err, errcodeGripperMove) {
 		return fmt.Errorf("gripper move failed (controller errcode 73, gripper movement error): confirm a "+
 			"gripper is configured and its peripheral protocol is enabled on the controller (WebApp/teach "+
@@ -288,13 +318,13 @@ func (g *fairinoGripper) moveGripper(ctx context.Context, pos int) error {
 // shares with the arm, queueing the arm's STOP behind it. Completion is read
 // from the status feed instead (waitForGripperMove). type=0 / rot* are the
 // parallel two-finger (non-rotary) values; rotNum is a double.
-func (g *fairinoGripper) moveGripperOnce(ctx context.Context, pos int) error {
+func (g *fairinoGripper) moveGripperOnce(ctx context.Context, pos, speed, force int) error {
 	sentAt := time.Now()
 	if err := g.cmd.moveGripper(ctx, moveGripperParams{
 		Index:   gripperIndex,
 		Pos:     pos,
-		Vel:     g.speed,
-		Force:   g.force,
+		Vel:     speed,
+		Force:   force,
 		MaxTime: g.maxTime,
 		Block:   1, // non-blocking: see above
 		Type:    0, // parallel two-finger, not rotary
@@ -380,14 +410,16 @@ func (g *fairinoGripper) IsHoldingSomething(ctx context.Context, extra map[strin
 	if err != nil {
 		return gripper.HoldingStatus{}, err
 	}
+	holding, dropped, detectable := decodeGripperHold(g.vendor, fr.GripperMotionDone)
 	return gripper.HoldingStatus{
-		IsHoldingSomething: fr.GripperMotionDone == gripperMotionClamped,
+		IsHoldingSomething: holding,
 		Meta: map[string]any{
-			"motion_done": fr.GripperMotionDone,
-			"dropped":     fr.GripperMotionDone == gripperMotionDropped,
-			"fault":       fr.GripperFault,
-			"active":      fr.GripperActive,
-			"position":    fr.GripperPosition,
+			"motion_done":    fr.GripperMotionDone,
+			"dropped":        dropped,
+			"hold_detection": detectable,
+			"fault":          fr.GripperFault,
+			"active":         fr.GripperActive,
+			"position":       fr.GripperPosition,
 		},
 	}, nil
 }
@@ -577,18 +609,28 @@ func (g *fairinoGripper) DoCommand(ctx context.Context, cmd map[string]any) (map
 		return map[string]any{"ok": true}, nil
 	case "move":
 		pos := intFromCmd(cmd, "position")
+		g.paramMu.Lock()
 		if s := intFromCmd(cmd, "speed"); s > 0 {
 			g.speed = s
 		}
 		if f := intFromCmd(cmd, "force"); f > 0 {
 			g.force = f
 		}
+		g.paramMu.Unlock()
 		if err := g.moveGripper(ctx, pos); err != nil {
 			return nil, err
 		}
 		return map[string]any{"ok": true, "position": pos}, nil
+	case "set_speed_force":
+		return g.setSpeedForce(cmd)
+	case "get_speed_force":
+		speed, force := g.speedForce()
+		return map[string]any{"speed_percent": speed, "force_percent": force}, nil
+	case "grab_with_force":
+		return g.grabWithForce(ctx, cmd)
 	default:
-		return nil, fmt.Errorf("unknown command %q (supported: gripper_config, software_version, status, activate, deactivate, set_config, move)", command)
+		return nil, fmt.Errorf("unknown command %q (supported: gripper_config, status, activate, deactivate, "+
+			"set_config, move, set_speed_force, get_speed_force, grab_with_force, diag)", command)
 	}
 }
 
