@@ -158,6 +158,7 @@ go run ./cmd/fairino-test -host <ip> gripper open|close|move <0-100>
 | `MoveToPosition` | ✅ via a `motion.Service` (see the "frame" config requirement above) — IK-solved, self-collision-checked joint trajectory, never a direct Cartesian command to the controller |
 | `Properties` | ✅ Cartesian commands when a motion service is available; manual mode not yet |
 | `GoToInputs` | ✅ delegates to `MoveThroughJointPositions` (this is what the motion service's plan executor actually calls) |
+| `MoveThroughJointPositionsStreamed` | ⚠️ experimental, not yet verified on hardware: one `ServoJ` setpoint per point, paced by the point's `Time`; points must be at most 16 ms apart. Stop/cancel sends `STOP` |
 | `Kinematics` / `Geometries` / `Get3DModels` | ✅ real kinematic model (see the mesh/mass-inertia accuracy caveat above) |
 | `EndPosition` | ✅ via forward kinematics — see its doc comment for a still-open design question (device-reported pose vs. FK) |
 | `Stop` | ✅ cancels any in-flight move and sends `STOP` |
