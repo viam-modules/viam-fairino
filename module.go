@@ -20,7 +20,7 @@
 // arm/fr5_SOURCES.md / arm/fr5wml_SOURCES.md for provenance); Geometries and
 // Get3DModels both use that same model and its bundled meshes. EndPosition
 // is implemented via forward kinematics (see its own doc comment for the
-// still-open design question). Stop is still stubbed.
+// still-open design question).
 //
 // The wire protocols use degrees and millimeters (constants.go/status.go/
 // command.go); all conversion to radians/SI happens in this file, at the
@@ -626,9 +626,7 @@ completed:
 		select {
 		case <-ctx.Done():
 			s.logger.Debugw("waitForMotionComplete: ctx cancelled, sending STOP", "elapsed", time.Since(pollStart), "ctx_err", ctx.Err())
-			stopCtx, cancelStop := context.WithTimeout(context.Background(), 2*time.Second)
-			_ = s.cmd.stop(stopCtx)
-			cancelStop()
+			s.stopDetached()
 			return ctx.Err()
 		case <-time.After(motionPollInterval):
 		}
@@ -655,6 +653,21 @@ completed:
 			s.logger.Debugw("waitForMotionComplete: motion done but joints out of tolerance", "elapsed", time.Since(pollStart), "joint_deg", fr.JointDegs, "target_deg", targetDeg)
 			return fmt.Errorf("motion completed but joints did not reach target (got %v want %v degrees)", fr.JointDegs, targetDeg)
 		}
+	}
+}
+
+// stopDetachedTimeout bounds the STOP sent after a move's own context is
+// already done, which is why it can't use that context.
+const stopDetachedTimeout = 2 * time.Second
+
+// stopDetached sends STOP on a fresh short-lived context. Used when a move is
+// cancelled: the caller's ctx is already done, but the controller may still be
+// executing (or have queued, when blending) the motion we sent it.
+func (s *viamFairinoFairino) stopDetached() {
+	ctx, cancel := context.WithTimeout(context.Background(), stopDetachedTimeout)
+	defer cancel()
+	if err := s.cmd.stop(ctx); err != nil {
+		s.logger.Warnw("failed to send STOP after cancelling a move", "err", err)
 	}
 }
 
@@ -686,13 +699,6 @@ func (s *viamFairinoFairino) Close(context.Context) error {
 	s.cancelFunc()
 	return nil
 }
-
-// ---------- stubbed methods ----------
-
-// errPhase2 marks Stop, the one remaining stubbed method. Everything else
-// that needs the command port (MoveToJointPositions, MoveThroughJointPositions,
-// MoveToPosition, GoToInputs) is implemented.
-var errPhase2 = errors.New("not implemented yet; motion via the command port is planned but not yet built for this method")
 
 // EndPosition returns the current position of the arm, computed via the
 // kinematic model's forward kinematics (kinematics.go) from the current
@@ -736,12 +742,18 @@ func (s *viamFairinoFairino) EndPosition(ctx context.Context, extra map[string]i
 // directly — that's what the builtin motion service's plan executor
 // actually calls (framesystem.InputEnabled), so GoToInputs can't be left
 // stubbed once this depends on a motion service.
+//
+// Deliberately not registered with s.opMgr (same as viam-ufactory-xarm): the
+// motion service calls back into GoToInputs over gRPC with a fresh context,
+// so GoToInputs's own opMgr.New can't see this call as its parent. If this
+// held an operation, that New would cancel it and wait for it to return,
+// while it is itself waiting on the motion service — the plan would fail
+// every time. GoToInputs owns the operation instead, which is also what
+// makes Stop halt a plan mid-execution.
 func (s *viamFairinoFairino) MoveToPosition(ctx context.Context, pose spatialmath.Pose, extra map[string]interface{}) error {
 	if s.motion == nil {
 		return errors.New("fairino cannot do MoveToPosition without a motion service available (see MoveToPosition's doc comment)")
 	}
-	ctx, done := s.opMgr.New(ctx)
-	defer done()
 	_, err := s.motion.Move(ctx, motion.MoveReq{
 		ComponentName: s.Name().Name,
 		Destination:   referenceframe.NewPoseInFrame(fmt.Sprintf("%s_origin", s.Name().Name), pose),
@@ -750,11 +762,8 @@ func (s *viamFairinoFairino) MoveToPosition(ctx context.Context, pose spatialmat
 }
 
 // MoveThroughJointPositions moves the arm's joints through the given
-// positions in order, via moveToJointPositionsOnce per waypoint. Doesn't
-// call s.opMgr.New itself — see that method's doc comment for why — so a
-// direct caller other than MoveToPosition or GoToInputs (which wrap one
-// operation around the whole sequence) runs without single-operation
-// protection.
+// positions in order, via moveToJointPositionsOnce per waypoint, as a single
+// s.opMgr operation — so a new move or Stop cancels the whole sequence.
 //
 // options (MaxVelRads/MaxAccRads) isn't consumed: this module's command
 // protocol only has a single fixed per-config speed (Config.JointSpeedPercent).
@@ -766,6 +775,8 @@ func (s *viamFairinoFairino) MoveToPosition(ctx context.Context, pose spatialmat
 // trajectories, since they delegate here too — see the README for the
 // resulting "cut corner" caveat.
 func (s *viamFairinoFairino) MoveThroughJointPositions(ctx context.Context, positions [][]referenceframe.Input, options *arm.MoveOptions, extra map[string]interface{}) error {
+	ctx, done := s.opMgr.New(ctx)
+	defer done()
 	for i, goal := range positions {
 		// The last waypoint always blocks; intermediate waypoints blend when
 		// Config.BlendTimeMs is set, otherwise they block too.
@@ -774,6 +785,11 @@ func (s *viamFairinoFairino) MoveThroughJointPositions(ctx context.Context, posi
 			blendT = float64(s.cfg.BlendTimeMs)
 		}
 		if err := s.moveToJointPositionsOnce(ctx, goal, blendT); err != nil {
+			if ctx.Err() != nil && blendT > 0 {
+				// Cancelled while sending a blended waypoint: the ones already
+				// acked are queued on the controller and would keep running.
+				s.stopDetached()
+			}
 			return fmt.Errorf("waypoint %d/%d: %w", i+1, len(positions), err)
 		}
 	}
@@ -790,8 +806,14 @@ func (s *viamFairinoFairino) GoToInputs(ctx context.Context, inputSteps ...[]ref
 	return s.MoveThroughJointPositions(ctx, inputSteps, nil, nil)
 }
 
+// Stop halts the arm. It first cancels any in-flight move this module is
+// running (opMgr.New blocks until that move has returned — it sends STOP
+// itself on the way out), then sends STOP (manual §2.35) regardless, so the
+// arm also stops if the motion was queued some other way.
 func (s *viamFairinoFairino) Stop(ctx context.Context, extra map[string]interface{}) error {
-	return errPhase2
+	ctx, done := s.opMgr.New(ctx)
+	defer done()
+	return s.cmd.stop(ctx)
 }
 
 // Kinematics returns the selected model's kinematic model, built once at

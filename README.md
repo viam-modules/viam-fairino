@@ -9,7 +9,7 @@ kinematic model (`Kinematics`/`Geometries`/`Get3DModels`, including 3D-scene
 rendering in the Viam app). **The kinematic model's link lengths are
 CAD-corrected but its meshes and mass/inertia are still known-inaccurate
 placeholders**, pending the correct source files for this exact arm variant
-(FR5-WML). `Stop` remains unimplemented.
+(FR5-WML).
 
 ## Cartesian motion (`MoveToPosition`) requires a `"frame"` config block
 
@@ -152,7 +152,7 @@ go run ./cmd/fairino-test -host <ip> gripper open|close|move <0-100>
 | `GoToInputs` | ✅ delegates to `MoveThroughJointPositions` (this is what the motion service's plan executor actually calls) |
 | `Kinematics` / `Geometries` / `Get3DModels` | ✅ real kinematic model (see the mesh/mass-inertia accuracy caveat above) |
 | `EndPosition` | ✅ via forward kinematics — see its doc comment for a still-open design question (device-reported pose vs. FK) |
-| `Stop` | ❌ not implemented |
+| `Stop` | ✅ cancels any in-flight move and sends `STOP` |
 
 If the status connection drops, the implemented methods return the connection
 error rather than stale data, and `Status` reports the resource unhealthy. The
