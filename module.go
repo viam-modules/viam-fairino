@@ -86,6 +86,11 @@ type Config struct {
 	// default, so this module picks the same value the vendor SDK does.
 	JointSpeedPercent int `json:"joint_speed_percent,omitempty"`
 
+	// SpeedDegsPerSec is the default joint speed in degrees per second, an
+	// alternative to JointSpeedPercent (set at most one). Converted to MoveJ's
+	// percentage against maxJointSpeedDegsPerSec. Range (0, 180].
+	SpeedDegsPerSec float64 `json:"speed_degs_per_sec,omitempty"`
+
 	// UseURDF selects the selected model's on-disk URDF as the kinematics
 	// source instead of the default embedded JSON (kinematics.go). The URDF
 	// path requires VIAM_MODULE_ROOT to be set (true for a normally-deployed
@@ -146,6 +151,12 @@ func (cfg *Config) Validate(path string) ([]string, []string, error) {
 	if v := cfg.JointSpeedPercent; v < 0 || v > 100 {
 		return nil, nil, fmt.Errorf("%s: joint_speed_percent must be between 1 and 100, got %d", path, v)
 	}
+	if v := cfg.SpeedDegsPerSec; v < 0 || v > maxJointSpeedDegsPerSec {
+		return nil, nil, fmt.Errorf("%s: speed_degs_per_sec must be between 0 and %v, got %v", path, maxJointSpeedDegsPerSec, v)
+	}
+	if cfg.SpeedDegsPerSec > 0 && cfg.JointSpeedPercent > 0 {
+		return nil, nil, fmt.Errorf("%s: set at most one of speed_degs_per_sec and joint_speed_percent", path)
+	}
 	if v := cfg.BlendTimeMs; v < 0 || v > 500 {
 		return nil, nil, fmt.Errorf("%s: blend_time_ms must be between 0 and 500, got %d", path, v)
 	}
@@ -195,6 +206,11 @@ type viamFairinoFairino struct {
 	status *statusClient
 	cmd    *commandClient
 	opMgr  *operation.SingleOperationManager
+
+	// speedMu guards speedPct, the current default speed as a MoveJ
+	// percentage; zero means "use the configured speed" (see speed.go).
+	speedMu  sync.Mutex
+	speedPct float64
 
 	// plans holds the cancel funcs of in-flight MoveToPosition calls, which
 	// hold no operation of their own (see MoveToPosition), so that Stop and
@@ -399,6 +415,8 @@ func (s *viamFairinoFairino) Status(ctx context.Context) (map[string]interface{}
 // drag-teach (free-drive) mode control:
 //
 //	{"command": "status"} → every Phase 1 field plus payload diagnostics.
+//	{"command": "set_speed", "speed_degs_per_sec": N} → default joint speed for later moves
+//	{"command": "get_speed"} → the current default joint speed
 //	{"command": "enter_drag_mode"} → DragTeachSwitch(1)
 //	{"command": "exit_drag_mode"} → DragTeachSwitch(0).
 func (s *viamFairinoFairino) DoCommand(ctx context.Context, cmd map[string]interface{}) (map[string]interface{}, error) {
@@ -410,6 +428,17 @@ func (s *viamFairinoFairino) DoCommand(ctx context.Context, cmd map[string]inter
 			return nil, err
 		}
 		return statusDump(fr), nil
+	case "set_speed":
+		v, ok := floatArg(cmd, "speed_degs_per_sec")
+		if !ok {
+			return nil, errors.New(`set_speed needs a numeric "speed_degs_per_sec"`)
+		}
+		if err := s.setSpeedDegsPerSec(v); err != nil {
+			return nil, err
+		}
+		return map[string]interface{}{"speed_degs_per_sec": v}, nil
+	case "get_speed":
+		return map[string]interface{}{"speed_degs_per_sec": speedDegsFromPercent(s.currentSpeedPercent())}, nil
 	case "enter_drag_mode":
 		if err := s.cmd.dragTeachSwitch(ctx, true); err != nil {
 			return nil, err
@@ -421,7 +450,7 @@ func (s *viamFairinoFairino) DoCommand(ctx context.Context, cmd map[string]inter
 		}
 		return map[string]interface{}{"ok": true}, nil
 	default:
-		return nil, fmt.Errorf("unknown command %q (supported: \"status\", \"enter_drag_mode\", \"exit_drag_mode\")", command)
+		return nil, fmt.Errorf("unknown command %q (supported: \"status\", \"set_speed\", \"get_speed\", \"enter_drag_mode\", \"exit_drag_mode\")", command)
 	}
 }
 
@@ -503,7 +532,9 @@ const (
 
 	// maxJointSpeedDegsPerSec is the joint speed that MoveJ's speed=100%
 	// corresponds to. The FR5 datasheet gives 180°/s on every joint. The
-	// FR5-WML's isn't published, so it is assumed to be the same.
+	// FR5-WML's isn't published, so it is assumed to be the same; if its real
+	// maximum is lower, a requested speed comes out slower than asked, never
+	// faster.
 	maxJointSpeedDegsPerSec = 180.0
 )
 
@@ -551,7 +582,8 @@ func (s *viamFairinoFairino) MoveToJointPositions(ctx context.Context, positions
 	if err != nil {
 		return err
 	}
-	sent, err := s.moveToJointPositionsOnce(ctx, positions, blendTBlocking, maxJointTravelDeg(fr.JointDegs, inputsToDeg(positions)))
+	sent, err := s.moveToJointPositionsOnce(ctx, positions, blendTBlocking, s.moveSpeedPercent(nil, extra),
+		maxJointTravelDeg(fr.JointDegs, inputsToDeg(positions)))
 	if err != nil && sent {
 		// Cancelled or failed after the MoveJ reached the controller, which
 		// would otherwise carry on with it.
@@ -638,7 +670,7 @@ const blendTBlocking = -1
 // queue blends between them. blendT == 0 is rejected: a 0ms blend is
 // indistinguishable from a full stop, so it's never a meaningful value to
 // send.
-func (s *viamFairinoFairino) moveToJointPositionsOnce(ctx context.Context, positions []referenceframe.Input, blendT, travelDeg float64) (sent bool, err error) {
+func (s *viamFairinoFairino) moveToJointPositionsOnce(ctx context.Context, positions []referenceframe.Input, blendT, speedPct, travelDeg float64) (sent bool, err error) {
 	if blendT == 0 {
 		return false, errors.New("moveToJointPositionsOnce: blendT must not be 0 (0ms blend is no different from a full stop)")
 	}
@@ -666,7 +698,6 @@ func (s *viamFairinoFairino) moveToJointPositionsOnce(ctx context.Context, posit
 	}
 	s.logger.Debugw("moveToJointPositionsOnce: forward kinematics for target", "target_deg", targetDeg, "target_pose", targetPose)
 
-	speedPct := float64(orDefaultInt(s.cfg.JointSpeedPercent, defaultJointSpeedPercent))
 	params := moveJParams{
 		Joints:       targetDeg,
 		Pose:         targetPose,
@@ -942,8 +973,9 @@ func (s *viamFairinoFairino) planning() bool {
 // positions in order, via moveToJointPositionsOnce per waypoint, as a single
 // s.opMgr operation — so a new move or Stop cancels the whole sequence.
 //
-// options (MaxVelRads/MaxAccRads) isn't consumed: this module's command
-// protocol only has a single fixed per-config speed (Config.JointSpeedPercent).
+// Speed comes from options/extra when given, else the current default (see
+// moveSpeedPercent). MaxAccRads isn't consumed: MoveJ's acceleration field is
+// reserved on the controller (see moveJParams.AccelPercent).
 //
 // Blending: with Config.BlendTimeMs nonzero and more than one waypoint, every
 // waypoint but the last blends (non-blocking, no completion wait); the last
@@ -967,6 +999,7 @@ func (s *viamFairinoFairino) MoveThroughJointPositions(ctx context.Context, posi
 	// travel accumulates the joint travel queued since the last blocking
 	// waypoint, which is what the next completion wait has to allow for.
 	prevDeg, travel, sent := fr.JointDegs, 0.0, false
+	speedPct := s.moveSpeedPercent(options, extra)
 	for i, goal := range positions {
 		// The last waypoint always blocks; intermediate waypoints blend when
 		// Config.BlendTimeMs is set, otherwise they block too.
@@ -977,7 +1010,7 @@ func (s *viamFairinoFairino) MoveThroughJointPositions(ctx context.Context, posi
 		goalDeg := inputsToDeg(goal)
 		travel += maxJointTravelDeg(prevDeg, goalDeg)
 		prevDeg = goalDeg
-		wpSent, err := s.moveToJointPositionsOnce(ctx, goal, blendT, travel)
+		wpSent, err := s.moveToJointPositionsOnce(ctx, goal, blendT, speedPct, travel)
 		sent = sent || wpSent
 		if err != nil {
 			if sent {

@@ -32,7 +32,7 @@ func TestValidateBlendTimeMs(t *testing.T) {
 func TestMoveToJointPositionsOnceRejectsZeroBlendT(t *testing.T) {
 	s := &viamFairinoFairino{}
 	positions := make([]referenceframe.Input, 6)
-	if _, err := s.moveToJointPositionsOnce(context.Background(), positions, 0, 0); err == nil {
+	if _, err := s.moveToJointPositionsOnce(context.Background(), positions, 0, defaultJointSpeedPercent, 0); err == nil {
 		t.Error("blendT=0: expected an error, got nil")
 	}
 }
