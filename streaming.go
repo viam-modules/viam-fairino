@@ -38,7 +38,16 @@ func (s *viamFairinoFairino) MoveThroughJointPositionsStreamed(
 	if err := s.checkReadyToMove(ctx); err != nil {
 		return err
 	}
+	return s.runServoStream(ctx, batches, responses)
+}
 
+// runServoStream is MoveThroughJointPositionsStreamed's executor, shared with
+// the trajectory-generator path (trajgen.go). The caller owns the operation.
+func (s *viamFairinoFairino) runServoStream(
+	ctx context.Context,
+	batches <-chan []arm.TrajectoryPoint,
+	responses chan<- arm.Response,
+) (err error) {
 	var (
 		anchor  time.Time
 		sent    bool

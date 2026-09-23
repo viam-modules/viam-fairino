@@ -44,6 +44,7 @@ import (
 	"go.viam.com/rdk/operation"
 	"go.viam.com/rdk/referenceframe"
 	"go.viam.com/rdk/resource"
+	"go.viam.com/rdk/services/mlmodel"
 	"go.viam.com/rdk/services/motion"
 	"go.viam.com/rdk/spatialmath"
 	rdkutils "go.viam.com/rdk/utils"
@@ -145,6 +146,11 @@ type Config struct {
 	WebAppProxy     bool   `json:"webapp_proxy,omitempty"`
 	WebAppProxyPort int    `json:"webapp_proxy_port,omitempty"`
 	WebAppURL       string `json:"webapp_url,omitempty"`
+
+	// TrajGen, when set, generates every multi-waypoint move's trajectory with
+	// an ML model service (e.g. trajex) and executes it as a ServoJ stream,
+	// instead of one MoveJ per waypoint. See trajgen.go.
+	TrajGen *TrajGenConfig `json:"trajectory_generator,omitempty"`
 }
 
 // collisionLevels resolves CollisionLevel/CollisionLevels to per-joint levels;
@@ -234,6 +240,12 @@ func (cfg *Config) Validate(path string) ([]string, []string, error) {
 	} else {
 		optionalDeps = append(optionalDeps, motion.Named("builtin").String())
 	}
+	if cfg.TrajGen != nil {
+		if err := cfg.TrajGen.validate(path); err != nil {
+			return nil, nil, err
+		}
+		deps = append(deps, mlmodel.Named(cfg.TrajGen.Service).String())
+	}
 	return deps, optionalDeps, nil
 }
 
@@ -280,6 +292,10 @@ type viamFairinoFairino struct {
 	speedPct float64
 
 	webApp *webAppProxy // nil unless Config.WebAppProxy
+
+	// trajGen generates trajectories for MoveThroughJointPositions; nil
+	// unless Config.TrajGen is set.
+	trajGen mlmodel.Service
 
 	// plans holds the cancel funcs of in-flight MoveToPosition calls, which
 	// hold no operation of their own (see MoveToPosition), so that Stop and
@@ -439,6 +455,13 @@ func NewFairino(ctx context.Context, deps resource.Dependencies, name resource.N
 		motionSvc = nil
 	}
 
+	var trajGen mlmodel.Service
+	if conf.TrajGen != nil {
+		if trajGen, err = mlmodel.FromProvider(deps, conf.TrajGen.Service); err != nil {
+			return nil, fmt.Errorf("trajectory generator %q: %w", conf.TrajGen.Service, err)
+		}
+	}
+
 	s := &viamFairinoFairino{
 		name:          name,
 		logger:        logger,
@@ -447,6 +470,7 @@ func NewFairino(ctx context.Context, deps resource.Dependencies, name resource.N
 		model:         model,
 		meshVisualDir: assets.meshVisualDir,
 		motion:        motionSvc,
+		trajGen:       trajGen,
 		status:        status,
 		cmd:           cmd,
 		opMgr:         operation.NewSingleOperationManager(),
@@ -1138,6 +1162,9 @@ func (s *viamFairinoFairino) MoveThroughJointPositions(ctx context.Context, posi
 	speedPct, err := s.moveSpeedPercent(options, extra)
 	if err != nil {
 		return err
+	}
+	if s.trajGen != nil {
+		return s.moveWithTrajGen(ctx, positions, speedPct)
 	}
 	fr, err := s.latestFrame(ctx)
 	if err != nil {
