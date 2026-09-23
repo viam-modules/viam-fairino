@@ -14,6 +14,7 @@ func main() {
 	module.ModularMain(
 		resource.APIModel{API: arm.API, Model: viamfairino.Fairino},
 		resource.APIModel{API: gripper.API, Model: viamfairino.Gripper},
+		resource.APIModel{API: gripper.API, Model: viamfairino.VacuumGripper},
 		resource.APIModel{API: sensor.API, Model: viamfairino.FTSensor},
 	)
 }
