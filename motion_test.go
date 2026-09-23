@@ -126,3 +126,29 @@ func TestNewMoveCancelsPreviousMove(t *testing.T) {
 		t.Fatal("second move did not complete")
 	}
 }
+
+// Bad targets must be rejected before any command reaches the controller.
+func TestJointTargetsValidatedBeforeSending(t *testing.T) {
+	for name, target := range map[string][]referenceframe.Input{
+		"too few joints":  {0, 0, 0},
+		"too many joints": {0, 0, 0, 0, 0, 0, 0},
+		"beyond a limit":  {0, 0, 0, 0, 0, 100},
+	} {
+		t.Run(name, func(t *testing.T) {
+			fc := newFakeController(t)
+			fc.setReply(fakeFKReply)
+			s, _ := newControllerTestArm(t, fc, restingFrame([6]float64{}))
+
+			if err := s.MoveToJointPositions(context.Background(), target, nil); err == nil {
+				t.Error("MoveToJointPositions: expected an error")
+			}
+			waypoints := [][]referenceframe.Input{testTarget(), target}
+			if err := s.MoveThroughJointPositions(context.Background(), waypoints, nil, nil); err == nil {
+				t.Error("MoveThroughJointPositions: expected an error")
+			}
+			if sent := fc.sent(); len(sent) != 0 {
+				t.Errorf("commands sent for an invalid target: %v", sent)
+			}
+		})
+	}
+}

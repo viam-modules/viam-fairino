@@ -500,7 +500,28 @@ const (
 func (s *viamFairinoFairino) MoveToJointPositions(ctx context.Context, positions []referenceframe.Input, extra map[string]interface{}) error {
 	ctx, done := s.opMgr.New(ctx)
 	defer done()
+	if err := s.checkJointTargets(ctx, [][]referenceframe.Input{positions}); err != nil {
+		return err
+	}
 	return s.moveToJointPositionsOnce(ctx, positions, blendTBlocking)
+}
+
+// checkJointTargets rejects, before anything is sent to the controller, any
+// target with the wrong number of joints (which would otherwise index past the
+// end of the slice) or outside the kinematic model's joint limits. A joint
+// already outside its limits may still move back toward them — that is
+// arm.CheckDesiredJointPositions's rule, the same check viam-ufactory-xarm runs.
+func (s *viamFairinoFairino) checkJointTargets(ctx context.Context, targets [][]referenceframe.Input) error {
+	dof := len(s.model.DoF())
+	for i, target := range targets {
+		if len(target) != dof {
+			return fmt.Errorf("waypoint %d/%d has %d joint positions, the arm has %d joints", i+1, len(targets), len(target), dof)
+		}
+		if err := arm.CheckDesiredJointPositions(ctx, s, target); err != nil {
+			return fmt.Errorf("waypoint %d/%d: %w", i+1, len(targets), err)
+		}
+	}
+	return nil
 }
 
 // blendTBlocking is moveJParams.BlendT's "-1": decelerate to a full stop at
@@ -532,6 +553,9 @@ const blendTBlocking = -1
 func (s *viamFairinoFairino) moveToJointPositionsOnce(ctx context.Context, positions []referenceframe.Input, blendT float64) error {
 	if blendT == 0 {
 		return errors.New("moveToJointPositionsOnce: blendT must not be 0 (0ms blend is no different from a full stop)")
+	}
+	if len(positions) != 6 {
+		return fmt.Errorf("moveToJointPositionsOnce: expected 6 joint positions, got %d", len(positions))
 	}
 	moveStart := time.Now()
 	s.logger.Debugw("moveToJointPositionsOnce: called", "positions_rad", positions)
@@ -777,6 +801,9 @@ func (s *viamFairinoFairino) MoveToPosition(ctx context.Context, pose spatialmat
 func (s *viamFairinoFairino) MoveThroughJointPositions(ctx context.Context, positions [][]referenceframe.Input, options *arm.MoveOptions, extra map[string]interface{}) error {
 	ctx, done := s.opMgr.New(ctx)
 	defer done()
+	if err := s.checkJointTargets(ctx, positions); err != nil {
+		return err
+	}
 	for i, goal := range positions {
 		// The last waypoint always blocks; intermediate waypoints blend when
 		// Config.BlendTimeMs is set, otherwise they block too.
