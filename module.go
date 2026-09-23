@@ -20,7 +20,10 @@
 // arm/fr5_SOURCES.md / arm/fr5wml_SOURCES.md for provenance); Geometries and
 // Get3DModels both use that same model and its bundled meshes. EndPosition
 // is implemented via forward kinematics (see its own doc comment for the
-// still-open design question). Stop is still stubbed.
+// still-open design question). Manual (drag-teach) mode is supported via
+// SetManualMode/ManualMode/Properties (manual_mode.go), which drive the
+// controller's DragTeachSwitch over the command port. Stop and streamed joint
+// moves are still stubbed.
 //
 // The wire protocols use degrees and millimeters (constants.go/status.go/
 // command.go); all conversion to radians/SI happens in this file, at the
@@ -194,6 +197,8 @@ type viamFairinoFairino struct {
 	status *statusClient
 	cmd    *commandClient
 	opMgr  *operation.SingleOperationManager
+
+	manualExit exitTimer // auto-exit for SetManualMode's enabledFor
 
 	cancelCtx  context.Context
 	cancelFunc func()
@@ -681,6 +686,7 @@ func orDefaultInt(v, def int) int {
 }
 
 func (s *viamFairinoFairino) Close(context.Context) error {
+	s.manualExit.cancel()
 	releaseStatusClient(s.host, statusPort)
 	releaseCommandClient(s.host, commandPort)
 	s.cancelFunc()
@@ -791,6 +797,18 @@ func (s *viamFairinoFairino) GoToInputs(ctx context.Context, inputSteps ...[]ref
 }
 
 func (s *viamFairinoFairino) Stop(ctx context.Context, extra map[string]interface{}) error {
+	return errPhase2
+}
+
+// MoveThroughJointPositionsStreamed is unimplemented: this arm has no paced
+// servo-streaming path (see MoveThroughJointPositions for the supported
+// multi-waypoint move).
+func (s *viamFairinoFairino) MoveThroughJointPositionsStreamed(
+	ctx context.Context,
+	batches <-chan []arm.TrajectoryPoint,
+	responses chan<- arm.Response,
+	extra map[string]interface{},
+) error {
 	return errPhase2
 }
 
