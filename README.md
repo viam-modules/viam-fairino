@@ -66,6 +66,7 @@ This module provides the following model(s):
 
 - `viam-soleng:viam-fairino:fairino` - Fairino arm (FR5 or FR5-WML, auto-selected or selected by the `model` attribute)
 - `viam-soleng:viam-fairino:gripper` - Fairino-configured gripper (generic, percentage-based)
+- `viam-soleng:viam-fairino:ft_sensor` - wrist force/torque sensor (`sensor` API)
 
 ## Configuration
 
@@ -213,6 +214,24 @@ on the controller.
 
 `{"command": "enter_drag_mode"}` / `{"command": "exit_drag_mode"}` toggle the
 controller's drag-teach (free-drive) mode. This uses an undocumented command
+
+## Force/torque sensor
+
+```json
+{ "host": "192.168.58.2" }
+```
+
+`host` is the only attribute (default `192.168.58.2`). `Readings` returns
+`Fx_N`, `Fy_N`, `Fz_N` (N) and `TRx_Nm`, `TRy_Nm`, `TRz_Nm` (N·m) from the
+status feed, the same keys as viam-ufactory-xarm's `ft_sensor`. The sensor must
+be configured and activated on the controller first: an inactive sensor
+reports zeros, so `Readings` returns an error instead of zeros.
+
+| DoCommand | Effect |
+|---|---|
+| `{"command": "tare"}` | `FT_SetZero(1)`: zero at the current load. Hold the arm still at the unloaded reference pose first. |
+| `{"command": "clear_tare"}` | `FT_SetZero(0)`: remove the zero offset |
+| `{"command": "activate"}` / `{"command": "deactivate"}` | `FT_Activate(1/0)` |
 
 ## Gripper methods
 
