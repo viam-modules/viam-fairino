@@ -154,6 +154,11 @@ go run ./cmd/fairino-test -host <ip> gripper open|close|move <0-100>
 | `EndPosition` | ✅ via forward kinematics — see its doc comment for a still-open design question (device-reported pose vs. FK) |
 | `Stop` | ✅ cancels any in-flight move and sends `STOP` |
 
+Moves are refused up front while the controller is e-stopped or latched in a
+fault, with the fault decoded (including `GetRobotErrorCode`'s main/sub
+codes). The documented command protocol has no command to clear a fault, so
+clear it on the teach pendant or WebApp, then retry.
+
 If the status connection drops, the implemented methods return the connection
 error rather than stale data, and `Status` reports the resource unhealthy. The
 reader reconnects automatically with backoff.

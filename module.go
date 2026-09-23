@@ -500,10 +500,38 @@ const (
 func (s *viamFairinoFairino) MoveToJointPositions(ctx context.Context, positions []referenceframe.Input, extra map[string]interface{}) error {
 	ctx, done := s.opMgr.New(ctx)
 	defer done()
+	if err := s.checkReadyToMove(ctx); err != nil {
+		return err
+	}
 	if err := s.checkJointTargets(ctx, [][]referenceframe.Input{positions}); err != nil {
 		return err
 	}
 	return s.moveToJointPositionsOnce(ctx, positions, blendTBlocking)
+}
+
+// checkReadyToMove refuses to start a move while the controller is e-stopped
+// or latched in a fault, rather than sending a MoveJ that it will reject or
+// abandon. The documented command protocol (V3.9.9) has no command to clear a
+// fault (the vendor SDK's ResetAllError isn't on port 8080), so unlike
+// viam-ufactory-xarm this can't recover automatically: the error says what the
+// fault is and where to clear it.
+func (s *viamFairinoFairino) checkReadyToMove(ctx context.Context) error {
+	fr, err := s.latestFrame(ctx)
+	if err != nil {
+		return err
+	}
+	if fr.EmergencyStop {
+		return errors.New("Fairino controller is e-stopped: release the emergency stop before moving")
+	}
+	if fr.ErrorCode == 0 {
+		return nil
+	}
+	detail := ""
+	if mainCode, subCode, err := s.cmd.getRobotErrorCode(ctx); err == nil {
+		detail = fmt.Sprintf(" (main code %d, sub code %d)", mainCode, subCode)
+	}
+	return fmt.Errorf("Fairino controller is in a fault state: %s%s; clear it on the teach pendant or WebApp before moving",
+		faultCodeString(fr.ErrorCode), detail)
 }
 
 // checkJointTargets rejects, before anything is sent to the controller, any
@@ -808,6 +836,9 @@ func (s *viamFairinoFairino) MoveToPosition(ctx context.Context, pose spatialmat
 func (s *viamFairinoFairino) MoveThroughJointPositions(ctx context.Context, positions [][]referenceframe.Input, options *arm.MoveOptions, extra map[string]interface{}) error {
 	ctx, done := s.opMgr.New(ctx)
 	defer done()
+	if err := s.checkReadyToMove(ctx); err != nil {
+		return err
+	}
 	if err := s.checkJointTargets(ctx, positions); err != nil {
 		return err
 	}

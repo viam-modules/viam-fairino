@@ -3,6 +3,7 @@ package viamfairino
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -203,5 +204,35 @@ func TestSendRefusesCancelledContext(t *testing.T) {
 	}
 	if sent := fc.sent(); len(sent) != 0 {
 		t.Errorf("sent %v on a cancelled context", sent)
+	}
+}
+
+// A faulted or e-stopped controller must be reported up front, with the fault
+// decoded, and no MoveJ sent into it.
+func TestMoveRefusedWhileFaultedOrEStopped(t *testing.T) {
+	for name, tc := range map[string]struct {
+		frame   statusFrame
+		wantMsg string
+	}{
+		"e-stop": {statusFrame{EmergencyStop: true, MotionDone: true}, "e-stopped"},
+		"fault":  {statusFrame{ErrorCode: 3, MotionDone: true}, "collision failure (main code 3, sub code 7)"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			fc := newFakeController(t)
+			fc.setReply(func(cmdID int, _ string) string {
+				if cmdID == cmdIDGetRobotErrorCode {
+					return "3,7"
+				}
+				return "1"
+			})
+			s, _ := newControllerTestArm(t, fc, tc.frame)
+			err := s.MoveToJointPositions(context.Background(), testTarget(), nil)
+			if err == nil || !strings.Contains(err.Error(), tc.wantMsg) {
+				t.Errorf("got %v, want an error containing %q", err, tc.wantMsg)
+			}
+			if fc.count("MoveJ") != 0 {
+				t.Errorf("MoveJ sent to a controller that can't move: %v", fc.sent())
+			}
+		})
 	}
 }
