@@ -149,6 +149,7 @@ go run ./cmd/fairino-test -host <ip> gripper open|close|move <0-100>
 | `MoveToJointPositions` | ✅ single blocking `MoveJ` |
 | `MoveThroughJointPositions` | ✅ loops `MoveToJointPositions`' underlying mechanics per waypoint; blends through intermediate waypoints when `blend_time_ms` is set (see below) |
 | `MoveToPosition` | ✅ via a `motion.Service` (see the "frame" config requirement above) — IK-solved, self-collision-checked joint trajectory, never a direct Cartesian command to the controller |
+| `Properties` | ✅ Cartesian commands when a motion service is available; manual mode not yet |
 | `GoToInputs` | ✅ delegates to `MoveThroughJointPositions` (this is what the motion service's plan executor actually calls) |
 | `Kinematics` / `Geometries` / `Get3DModels` | ✅ real kinematic model (see the mesh/mass-inertia accuracy caveat above) |
 | `EndPosition` | ✅ via forward kinematics — see its doc comment for a still-open design question (device-reported pose vs. FK) |

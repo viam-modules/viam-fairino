@@ -196,8 +196,12 @@ type viamFairinoFairino struct {
 	cmd    *commandClient
 	opMgr  *operation.SingleOperationManager
 
-	cancelCtx  context.Context
-	cancelFunc func()
+	// plans holds the cancel funcs of in-flight MoveToPosition calls, which
+	// hold no operation of their own (see MoveToPosition), so that Stop and
+	// Close can still cancel them while the motion service is planning.
+	plansMu sync.Mutex
+	plans   map[*context.CancelFunc]struct{}
+	closed  bool // set by Close; later MoveToPosition calls are refused
 
 	closeOnce sync.Once
 }
@@ -242,8 +246,6 @@ func detectModel(ctx context.Context, cmd *commandClient, logger logging.Logger)
 }
 
 func NewFairino(ctx context.Context, deps resource.Dependencies, name resource.Name, conf *Config, logger logging.Logger) (arm.Arm, error) {
-	cancelCtx, cancelFunc := context.WithCancel(context.Background())
-
 	host := conf.Host
 	if host == "" {
 		host = defaultHost
@@ -266,7 +268,6 @@ func NewFairino(ctx context.Context, deps resource.Dependencies, name resource.N
 	if modelName == "" {
 		detected, err := detectModel(ctx, cmd, logger)
 		if err != nil {
-			cancelFunc()
 			return nil, fmt.Errorf("model not set in config and auto-detection failed "+
 				"(set model=%s explicitly): %w", supportedModels(), err)
 		}
@@ -275,7 +276,6 @@ func NewFairino(ctx context.Context, deps resource.Dependencies, name resource.N
 
 	model, err := makeModelFrame(name.Name, modelName, conf.UseURDF, conf.MeshDecimationRatios)
 	if err != nil {
-		cancelFunc()
 		return nil, err
 	}
 	// modelName is either validated (Validate) or came from detectModel, so
@@ -292,7 +292,6 @@ func NewFairino(ctx context.Context, deps resource.Dependencies, name resource.N
 	if conf.Motion != "" {
 		motionSvc, err = motion.FromProvider(deps, conf.Motion)
 		if err != nil {
-			cancelFunc()
 			return nil, fmt.Errorf("motion service %q: %w", conf.Motion, err)
 		}
 	} else if motionSvc, err = motion.FromProvider(deps, "builtin"); err != nil {
@@ -311,8 +310,6 @@ func NewFairino(ctx context.Context, deps resource.Dependencies, name resource.N
 		status:        acquireStatusClient(ctx, host, statusPort, logger),
 		cmd:           cmd,
 		opMgr:         operation.NewSingleOperationManager(),
-		cancelCtx:     cancelCtx,
-		cancelFunc:    cancelFunc,
 	}
 	cmdOwned = true // s now owns cmd; its Close releases it
 	// Wait for the first status frame so early API calls don't race the
@@ -826,7 +823,7 @@ func orDefaultInt(v, def int) int {
 // resources on this controller, so a second release would take theirs.
 func (s *viamFairinoFairino) Close(ctx context.Context) error {
 	s.closeOnce.Do(func() {
-		s.cancelFunc()
+		s.cancelPlans(true)
 		s.opMgr.CancelRunning(ctx)
 		releaseStatusClient(s.host, statusPort)
 		releaseCommandClient(s.host, commandPort)
@@ -883,16 +880,62 @@ func (s *viamFairinoFairino) EndPosition(ctx context.Context, extra map[string]i
 // held an operation, that New would cancel it and wait for it to return,
 // while it is itself waiting on the motion service — the plan would fail
 // every time. GoToInputs owns the operation instead, which is also what
-// makes Stop halt a plan mid-execution.
+// makes Stop halt a plan mid-execution. The call is tracked in s.plans
+// instead, so Stop and Close cancel it even while it is still planning —
+// otherwise a plan finished after a reconfigure would run on the rebuilt arm.
 func (s *viamFairinoFairino) MoveToPosition(ctx context.Context, pose spatialmath.Pose, extra map[string]interface{}) error {
 	if s.motion == nil {
 		return errors.New("fairino cannot do MoveToPosition without a motion service available (see MoveToPosition's doc comment)")
 	}
-	_, err := s.motion.Move(ctx, motion.MoveReq{
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	untrack, err := s.trackPlan(&cancel)
+	if err != nil {
+		return err
+	}
+	defer untrack()
+	_, err = s.motion.Move(ctx, motion.MoveReq{
 		ComponentName: s.Name().Name,
 		Destination:   referenceframe.NewPoseInFrame(fmt.Sprintf("%s_origin", s.Name().Name), pose),
 	})
 	return err
+}
+
+// trackPlan registers an in-flight MoveToPosition's cancel func; the returned
+// func unregisters it.
+func (s *viamFairinoFairino) trackPlan(cancel *context.CancelFunc) (func(), error) {
+	s.plansMu.Lock()
+	defer s.plansMu.Unlock()
+	if s.closed {
+		return nil, errors.New("arm is closed")
+	}
+	if s.plans == nil {
+		s.plans = map[*context.CancelFunc]struct{}{}
+	}
+	s.plans[cancel] = struct{}{}
+	return func() {
+		s.plansMu.Lock()
+		delete(s.plans, cancel)
+		s.plansMu.Unlock()
+	}, nil
+}
+
+// cancelPlans cancels every in-flight MoveToPosition; with closing, it also
+// refuses any started after this.
+func (s *viamFairinoFairino) cancelPlans(closing bool) {
+	s.plansMu.Lock()
+	defer s.plansMu.Unlock()
+	s.closed = s.closed || closing
+	for cancel := range s.plans {
+		(*cancel)()
+	}
+}
+
+// planning reports whether a MoveToPosition is in flight.
+func (s *viamFairinoFairino) planning() bool {
+	s.plansMu.Lock()
+	defer s.plansMu.Unlock()
+	return len(s.plans) > 0
 }
 
 // MoveThroughJointPositions moves the arm's joints through the given
@@ -961,12 +1004,13 @@ func (s *viamFairinoFairino) GoToInputs(ctx context.Context, inputSteps ...[]ref
 	return s.MoveThroughJointPositions(ctx, inputSteps, nil, nil)
 }
 
-// Stop halts the arm. It first cancels any in-flight move this module is
-// running (opMgr.New blocks until that move has returned — it sends STOP
-// itself on the way out), then sends STOP (manual §2.35) regardless, so the
-// arm also stops if the motion was queued some other way. The STOP goes out
-// even if ctx is already done (see commandClient.stop).
+// Stop halts the arm. It first cancels any MoveToPosition still planning and
+// any in-flight move this module is running (opMgr.New blocks until that move
+// has returned — it sends STOP itself on the way out), then sends STOP (manual
+// §2.35) regardless, so the arm also stops if the motion was queued some other
+// way. The STOP goes out even if ctx is already done (see commandClient.stop).
 func (s *viamFairinoFairino) Stop(ctx context.Context, extra map[string]interface{}) error {
+	s.cancelPlans(false)
 	ctx, done := s.opMgr.New(ctx)
 	defer done()
 	return s.cmd.stop(ctx)
@@ -977,11 +1021,12 @@ func (s *viamFairinoFairino) Stop(ctx context.Context, extra map[string]interfac
 var errNotImplemented = errors.New("not implemented yet for the Fairino arm")
 
 // Properties reports what this arm supports. Cartesian commands work via the
-// motion service (MoveToPosition). Manual mode is not reported yet: the
+// motion service (MoveToPosition), so they are only reported when one is
+// available. Manual mode is not reported yet: the
 // SetManualMode/ManualMode API isn't wired up (see RSDK-14463), although
 // drag-teach is reachable via DoCommand's enter_drag_mode/exit_drag_mode.
 func (s *viamFairinoFairino) Properties(ctx context.Context, extra map[string]interface{}) (arm.Properties, error) {
-	return arm.Properties{SupportCartesianCommands: true}, nil
+	return arm.Properties{SupportCartesianCommands: s.motion != nil}, nil
 }
 
 // SetManualMode is not implemented yet.

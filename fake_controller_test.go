@@ -127,14 +127,13 @@ func newControllerTestArm(t *testing.T, fc *fakeController, fr statusFrame) (*vi
 	cmd := newCommandClient("127.0.0.1", fc.port(), logger)
 	t.Cleanup(func() { _ = cmd.close() })
 	return &viamFairinoFairino{
-		name:       arm.Named("test"),
-		logger:     logger,
-		cfg:        &Config{},
-		model:      model,
-		status:     sc,
-		cmd:        cmd,
-		opMgr:      operation.NewSingleOperationManager(),
-		cancelFunc: func() {},
+		name:   arm.Named("test"),
+		logger: logger,
+		cfg:    &Config{},
+		model:  model,
+		status: sc,
+		cmd:    cmd,
+		opMgr:  operation.NewSingleOperationManager(),
 	}, sc
 }
 
