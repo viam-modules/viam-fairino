@@ -22,6 +22,7 @@ type fakeController struct {
 
 	mu       sync.Mutex
 	commands []string
+	at       []time.Time // when each command arrived
 	reply    func(cmdID int, data string) string
 }
 
@@ -64,6 +65,7 @@ func (f *fakeController) handle(conn net.Conn) {
 		}
 		f.mu.Lock()
 		f.commands = append(f.commands, data)
+		f.at = append(f.at, time.Now())
 		reply := f.reply
 		f.mu.Unlock()
 
@@ -92,6 +94,13 @@ func (f *fakeController) sent() []string {
 		out[i], _, _ = strings.Cut(c, "(")
 	}
 	return out
+}
+
+// received returns every command's full DATA and arrival time so far.
+func (f *fakeController) received() ([]string, []time.Time) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.commands...), append([]time.Time(nil), f.at...)
 }
 
 func (f *fakeController) count(name string) int {

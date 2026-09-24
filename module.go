@@ -7,8 +7,11 @@
 // sends motion commands on the controller's 8080 command port, via the
 // shared moveToJointPositionsOnce primitive: MoveToJointPositions calls it
 // directly for a single target, MoveThroughJointPositions loops it for a
-// multi-waypoint sequence, and GoToInputs delegates to
-// MoveThroughJointPositions. MoveToPosition (Cartesian moves) delegates to a
+// multi-waypoint sequence (or, with Config.TrajGen, runs a generated
+// trajectory as a ServoJ stream instead — trajgen.go), and GoToInputs
+// delegates to MoveThroughJointPositions. MoveThroughJointPositionsStreamed
+// executes a client's trajectory as ServoJ setpoints (streaming.go).
+// MoveToPosition (Cartesian moves) delegates to a
 // motion.Service (this robot's default "builtin" service unless Config.Motion
 // names another one) rather than planning IK itself — mirrors
 // viam-ufactory-xarm's MoveToPosition, not viam-dobot's self-contained
@@ -147,9 +150,11 @@ type Config struct {
 	WebAppProxyPort int    `json:"webapp_proxy_port,omitempty"`
 	WebAppURL       string `json:"webapp_url,omitempty"`
 
-	// TrajGen, when set, generates every multi-waypoint move's trajectory with
-	// an ML model service (e.g. trajex) and executes it as a ServoJ stream,
-	// instead of one MoveJ per waypoint. See trajgen.go.
+	// TrajGen, when set, generates the trajectory of every
+	// MoveThroughJointPositions call (single-waypoint ones and
+	// GoToInputs/MoveToPosition's included) with an ML model service (e.g.
+	// trajex) and executes it as a ServoJ stream, instead of one MoveJ per
+	// waypoint; BlendTimeMs then has no effect. See trajgen.go.
 	TrajGen *TrajGenConfig `json:"trajectory_generator,omitempty"`
 }
 
@@ -796,21 +801,25 @@ func (s *viamFairinoFairino) checkReadyToMove(ctx context.Context) error {
 // both limits, so CheckDesiredJointPositions lets it through, and it would
 // reach the controller as the literal text "NaN".
 func (s *viamFairinoFairino) checkJointTargets(ctx context.Context, targets [][]referenceframe.Input) error {
-	dof := len(s.model.DoF())
 	for i, target := range targets {
-		if len(target) != dof {
-			return fmt.Errorf("waypoint %d/%d has %d joint positions, the arm has %d joints", i+1, len(targets), len(target), dof)
-		}
-		for j, v := range target {
-			if math.IsNaN(v) || math.IsInf(v, 0) {
-				return fmt.Errorf("waypoint %d/%d: joint %d position is %v", i+1, len(targets), j, v)
-			}
-		}
-		if err := arm.CheckDesiredJointPositions(ctx, s, target); err != nil {
+		if err := s.checkJointTarget(ctx, target); err != nil {
 			return fmt.Errorf("waypoint %d/%d: %w", i+1, len(targets), err)
 		}
 	}
 	return nil
+}
+
+// checkJointTarget is checkJointTargets for one target.
+func (s *viamFairinoFairino) checkJointTarget(ctx context.Context, target []referenceframe.Input) error {
+	if dof := len(s.model.DoF()); len(target) != dof {
+		return fmt.Errorf("%d joint positions given, the arm has %d joints", len(target), dof)
+	}
+	for j, v := range target {
+		if math.IsNaN(v) || math.IsInf(v, 0) {
+			return fmt.Errorf("joint %d position is %v", j, v)
+		}
+	}
+	return arm.CheckDesiredJointPositions(ctx, s, target)
 }
 
 // blendTBlocking is moveJParams.BlendT's "-1": decelerate to a full stop at
@@ -1137,8 +1146,10 @@ func (s *viamFairinoFairino) planning() bool {
 }
 
 // MoveThroughJointPositions moves the arm's joints through the given
-// positions in order, via moveToJointPositionsOnce per waypoint, as a single
-// s.opMgr operation — so a new move or Stop cancels the whole sequence.
+// positions in order, as a single s.opMgr operation — so a new move or Stop
+// cancels the whole sequence: via moveToJointPositionsOnce per waypoint, or,
+// with Config.TrajGen set, as one generated ServoJ trajectory
+// (moveWithTrajGen), which ignores BlendTimeMs.
 //
 // Speed comes from options/extra when given, else the current default (see
 // moveSpeedPercent). MaxAccRads isn't consumed: MoveJ's acceleration field is

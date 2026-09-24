@@ -2,6 +2,8 @@ package viamfairino
 
 import (
 	"context"
+	"fmt"
+	"strings"
 	"testing"
 
 	"go.viam.com/rdk/ml"
@@ -11,22 +13,29 @@ import (
 	"gorgonia.org/tensor"
 )
 
-// fakeTrajGen returns the given samples (N x 6, radians), recording the
-// velocity limit it was asked for.
+// fakeTrajGen returns the given samples (N x 6, radians), 8 ms apart,
+// recording the velocity limit it was asked for. Like trajex, it rejects
+// inputs of the wrong dtype.
 func fakeTrajGen(samples [][]float64, gotVel *float64) *inject.MLModelService {
 	svc := inject.NewMLModelService("trajex")
 	svc.InferFunc = func(_ context.Context, in ml.Tensors) (ml.Tensors, error) {
+		for name, tn := range in {
+			if tn.Dtype() != tensor.Float64 {
+				return nil, fmt.Errorf("input '%s' has wrong dtype", name)
+			}
+		}
 		if gotVel != nil {
 			*gotVel = in["velocity_limits_rads_per_sec"].Data().([]float64)[0]
 		}
-		if len(samples) == 0 {
-			return ml.Tensors{}, nil
-		}
-		flat := []float64{}
-		for _, s := range samples {
+		flat, times := []float64{}, []float64{}
+		for i, s := range samples {
 			flat = append(flat, s...)
+			times = append(times, 0.008*float64(i))
 		}
-		return ml.Tensors{"configurations_rads": tensor.New(tensor.WithShape(len(samples), 6), tensor.WithBacking(flat))}, nil
+		return ml.Tensors{
+			"configurations_rads": tensor.New(tensor.WithShape(len(samples), 6), tensor.WithBacking(flat)),
+			"sample_times_sec":    tensor.New(tensor.WithShape(len(samples)), tensor.WithBacking(times)),
+		}, nil
 	}
 	return svc
 }
@@ -38,7 +47,14 @@ func TestMoveThroughUsesTrajectoryGenerator(t *testing.T) {
 	for i := range deg {
 		deg[i] = rdkutils.RadToDeg(final[i])
 	}
-	s, _ := newControllerTestArm(t, fc, restingFrame(deg))
+	s, sc := newControllerTestArm(t, fc, restingFrame([6]float64{}))
+	// The arm arrives once the last setpoint is in.
+	fc.setReply(func(cmdID int, data string) string {
+		if cmdID == cmdIDServoJ && strings.HasPrefix(data, fmt.Sprintf("ServoJ(%.4f", deg[0])) {
+			setTestFrame(sc, restingFrame(deg))
+		}
+		return "1"
+	})
 	var gotVel float64
 	s.cfg = &Config{SpeedDegsPerSec: 90, TrajGen: &TrajGenConfig{Service: "trajex"}}
 	s.trajGen = fakeTrajGen([][]float64{make([]float64, 6), {0.01, 0.01, 0.01, 0.01, 0.01, 0.01}, final}, &gotVel)
@@ -57,17 +73,59 @@ func TestMoveThroughUsesTrajectoryGenerator(t *testing.T) {
 	}
 }
 
-// When the generator says there's nothing to do, nothing is sent.
+// A move to where the arm already is never reaches the generator, which
+// (like trajex) would refuse a path without two distinct waypoints.
 func TestTrajectoryGeneratorAlreadyAtGoal(t *testing.T) {
 	fc := newFakeController(t)
 	s, _ := newControllerTestArm(t, fc, restingFrame([6]float64{}))
 	s.cfg = &Config{TrajGen: &TrajGenConfig{Service: "trajex"}}
-	s.trajGen = fakeTrajGen(nil, nil)
-	if err := s.MoveThroughJointPositions(context.Background(), [][]referenceframe.Input{make([]float64, 6)}, nil, nil); err != nil {
+	gen := fakeTrajGen(nil, nil)
+	called := false
+	infer := gen.InferFunc
+	gen.InferFunc = func(ctx context.Context, in ml.Tensors) (ml.Tensors, error) {
+		called = true
+		return infer(ctx, in)
+	}
+	s.trajGen = gen
+	here := make([]referenceframe.Input, 6)
+	if err := s.MoveThroughJointPositions(context.Background(), [][]referenceframe.Input{here, here}, nil, nil); err != nil {
 		t.Fatal(err)
+	}
+	if called {
+		t.Error("the generator was asked for a trajectory with nowhere to go")
 	}
 	if sent := fc.sent(); len(sent) != 0 {
 		t.Errorf("sent %v", sent)
+	}
+}
+
+// The whole generated trajectory is checked before any of it is sent: one
+// that breaks a joint limit partway is refused, not cut off mid-motion.
+func TestGeneratedTrajectoryCheckedBeforeSending(t *testing.T) {
+	fc := newFakeController(t)
+	s, _ := newControllerTestArm(t, fc, restingFrame([6]float64{}))
+	s.cfg = &Config{TrajGen: &TrajGenConfig{Service: "trajex"}}
+	beyond := []float64{0, 0, 0, 0, 0, 100}
+	s.trajGen = fakeTrajGen([][]float64{make([]float64, 6), {0.001, 0, 0, 0, 0, 0}, beyond}, nil)
+	err := s.MoveThroughJointPositions(context.Background(), [][]referenceframe.Input{{0.01, 0, 0, 0, 0, 0}}, nil, nil)
+	if err == nil {
+		t.Fatal("expected an error")
+	}
+	if sent := fc.sent(); len(sent) != 0 {
+		t.Errorf("sent %v for a trajectory that breaks a limit", sent)
+	}
+}
+
+// A generator answer without timing can't be executed.
+func TestTrajectoryGeneratorMissingOutputs(t *testing.T) {
+	fc := newFakeController(t)
+	s, _ := newControllerTestArm(t, fc, restingFrame([6]float64{}))
+	s.cfg = &Config{TrajGen: &TrajGenConfig{Service: "trajex"}}
+	gen := inject.NewMLModelService("trajex")
+	gen.InferFunc = func(context.Context, ml.Tensors) (ml.Tensors, error) { return ml.Tensors{}, nil }
+	s.trajGen = gen
+	if err := s.MoveThroughJointPositions(context.Background(), [][]referenceframe.Input{{0.01, 0, 0, 0, 0, 0}}, nil, nil); err == nil {
+		t.Error("expected an error")
 	}
 }
 

@@ -2,7 +2,9 @@ package viamfairino
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"math"
 	"time"
 
 	arm "go.viam.com/rdk/components/arm"
@@ -52,28 +54,42 @@ func floatOr(p *float64, def float64) float64 {
 	return *p
 }
 
-func scalar[T float64 | int64](v T) *tensor.Dense {
-	return tensor.New(tensor.WithShape(1), tensor.WithBacking([]T{v}))
+func scalar(v float64) *tensor.Dense {
+	return tensor.New(tensor.WithShape(1), tensor.WithBacking([]float64{v}))
 }
 
-// generateTrajectory asks the trajectory generator for samples from the current
-// position through waypoints, at trajGenSampleHz. It returns nil when the
-// generator reports nothing to do (fewer than two distinct waypoints).
+// generateTrajectory asks the trajectory generator for a trajectory from the
+// current position through waypoints, sampled at trajGenSampleHz, with each
+// point timed by the generator's own sample_times_sec. It returns no points
+// when there is nowhere to go: trajex refuses a path without two distinct
+// waypoints, so waypoints within the deduplication tolerance of the one before
+// (starting from the current position) are dropped here first, the same way.
 func (s *viamFairinoFairino) generateTrajectory(
 	ctx context.Context, waypoints [][]referenceframe.Input, speedPct float64,
-) ([][]float64, error) {
+) ([]arm.TrajectoryPoint, error) {
 	current, err := s.JointPositions(ctx, nil)
 	if err != nil {
 		return nil, err
 	}
-	const dof = 6
-	flat := make([]float64, 0, (len(waypoints)+1)*dof)
-	flat = append(flat, current...)
+	c := s.cfg.TrajGen
+	dedupTol := floatOr(c.WaypointDeduplicationToleranceRads, defaultTrajGenWaypointDedupToleranceRads)
+	path := [][]referenceframe.Input{current}
 	for _, wp := range waypoints {
+		if referenceframe.InputsLinfDistance(path[len(path)-1], wp) > dedupTol {
+			path = append(path, wp)
+		}
+	}
+	if len(path) < 2 {
+		return nil, nil // already there
+	}
+
+	const dof = 6
+	flat := make([]float64, 0, len(path)*dof)
+	for _, wp := range path {
 		flat = append(flat, wp...)
 	}
 	vel := rdkutils.DegToRad(speedDegsFromPercent(speedPct))
-	acc := rdkutils.DegToRad(s.cfg.TrajGen.MaxAccelerationDegsPerSec2)
+	acc := rdkutils.DegToRad(c.MaxAccelerationDegsPerSec2)
 	if acc == 0 {
 		acc = rdkutils.DegToRad(defaultTrajGenMaxAccelerationDegsPerSec2)
 	}
@@ -82,49 +98,67 @@ func (s *viamFairinoFairino) generateTrajectory(
 		velLimits[i], accLimits[i] = vel, acc
 	}
 
-	c := s.cfg.TrajGen
+	// Every scalar is float64: trajex rejects an input of the wrong dtype.
 	out, err := s.trajGen.Infer(ctx, ml.Tensors{
-		"waypoints_rads":                        tensor.New(tensor.WithShape(len(waypoints)+1, dof), tensor.WithBacking(flat)),
+		"waypoints_rads":                        tensor.New(tensor.WithShape(len(path), dof), tensor.WithBacking(flat)),
 		"velocity_limits_rads_per_sec":          tensor.New(tensor.WithShape(dof), tensor.WithBacking(velLimits)),
 		"acceleration_limits_rads_per_sec2":     tensor.New(tensor.WithShape(dof), tensor.WithBacking(accLimits)),
 		"path_tolerance_delta_rads":             scalar(floatOr(c.PathToleranceDeltaRads, defaultTrajGenPathToleranceDeltaRads)),
 		"path_colinearization_ratio":            scalar(floatOr(c.PathColinearizationRatio, 0)),
-		"waypoint_deduplication_tolerance_rads": scalar(floatOr(c.WaypointDeduplicationToleranceRads, defaultTrajGenWaypointDedupToleranceRads)),
-		"trajectory_sampling_freq_hz":           scalar(int64(trajGenSampleHz)),
+		"waypoint_deduplication_tolerance_rads": scalar(dedupTol),
+		"trajectory_sampling_freq_hz":           scalar(float64(trajGenSampleHz)),
 	})
 	if err != nil {
 		return nil, fmt.Errorf("trajectory generator: %w", err)
 	}
-	configs, ok := out["configurations_rads"]
-	if !ok {
-		return nil, nil // already at the goal
+	configs, okConfigs := out["configurations_rads"]
+	times, okTimes := out["sample_times_sec"]
+	if !okConfigs || !okTimes {
+		return nil, errors.New("trajectory generator returned no configurations_rads/sample_times_sec")
 	}
-	data, ok := configs.Data().([]float64)
-	if !ok || len(configs.Shape()) != 2 || configs.Shape()[1] != dof {
-		return nil, fmt.Errorf("trajectory generator returned configurations_rads of shape %v, want (N, %d) float64", configs.Shape(), dof)
+	data, okData := configs.Data().([]float64)
+	timeData, okTimeData := times.Data().([]float64)
+	if !okData || len(configs.Shape()) != 2 || configs.Shape()[1] != dof || !okTimeData || len(timeData) != configs.Shape()[0] {
+		return nil, fmt.Errorf("trajectory generator returned configurations_rads of shape %v and sample_times_sec of shape %v, "+
+			"want (N, %d) and (N) float64", configs.Shape(), times.Shape(), dof)
 	}
-	samples := make([][]float64, configs.Shape()[0])
-	for i := range samples {
-		samples[i] = data[i*dof : (i+1)*dof]
+	points := make([]arm.TrajectoryPoint, len(timeData))
+	for i, t := range timeData {
+		points[i] = arm.TrajectoryPoint{
+			Time:      time.Duration(math.Round(t * float64(time.Second))),
+			Positions: data[i*dof : (i+1)*dof],
+		}
 	}
-	return samples, nil
+	return points, nil
 }
 
-// moveWithTrajGen executes waypoints as a generated trajectory: every sample
-// becomes a ServoJ point, 1/trajGenSampleHz apart, each checked against the
-// joint limits as it goes out. The caller owns the operation.
+// moveWithTrajGen executes waypoints as a generated trajectory, every sample
+// a ServoJ setpoint. The whole trajectory exists before the arm moves, so all
+// of it is checked first (limits, start, step speed, spacing — see
+// servoStreamer.check): one that breaks a limit partway is refused outright
+// rather than cut off mid-motion. The caller owns the operation.
 func (s *viamFairinoFairino) moveWithTrajGen(ctx context.Context, waypoints [][]referenceframe.Input, speedPct float64) error {
-	samples, err := s.generateTrajectory(ctx, waypoints, speedPct)
-	if err != nil || len(samples) == 0 {
+	points, err := s.generateTrajectory(ctx, waypoints, speedPct)
+	if err != nil || len(points) == 0 {
 		return err
 	}
-	period := time.Second / trajGenSampleHz
-	points := make([]arm.TrajectoryPoint, len(samples))
-	for i, sample := range samples {
-		points[i] = arm.TrajectoryPoint{Time: time.Duration(i) * period, Positions: sample}
+	dryRun := &servoStreamer{s: s}
+	for _, p := range points {
+		if err := dryRun.check(ctx, p); err != nil {
+			return fmt.Errorf("generated trajectory: %w", err)
+		}
 	}
-	batches := make(chan []arm.TrajectoryPoint, 1)
-	batches <- points
-	close(batches)
-	return s.runServoStream(ctx, batches, make(chan arm.Response, 1))
+	st := &servoStreamer{s: s}
+	err = func() error {
+		for _, p := range points {
+			if err := st.send(ctx, p); err != nil {
+				return err
+			}
+		}
+		return st.finish(ctx)
+	}()
+	if err != nil && st.sent {
+		s.stopDetached()
+	}
+	return err
 }
