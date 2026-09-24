@@ -82,6 +82,29 @@ func (c *statusClient) latest() (statusFrame, bool, error) {
 	return c.frame, c.have, c.err
 }
 
+// current returns the latest frame, or an error saying why there is none,
+// without waiting: for status and health checks, which should report a dead
+// feed at once.
+func (c *statusClient) current() (statusFrame, error) {
+	fr, ok, err := c.latest()
+	if ok {
+		return fr, nil
+	}
+	if err == nil {
+		err = errors.New("no status frame received yet")
+	}
+	return statusFrame{}, fmt.Errorf("status stream down: %w", err)
+}
+
+// await returns the latest frame, waiting briefly (waitForFrame) if none has
+// arrived yet, as is typical right after startup.
+func (c *statusClient) await(ctx context.Context) (statusFrame, error) {
+	if fr, ok, _ := c.latest(); ok {
+		return fr, nil
+	}
+	return c.waitForFrame(ctx)
+}
+
 // waitForFrameThroughErrors waits for a frame until ctx is done, riding out
 // connection errors (the reader keeps retrying) that waitForFrame returns at
 // once, and returns the last one if no frame arrives.

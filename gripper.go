@@ -494,6 +494,8 @@ func (g *fairinoGripper) CurrentInputs(ctx context.Context) ([]referenceframe.In
 // GoToInputs drives the fingers to the requested opening by mapping the joint
 // input back to a percentage and issuing MoveGripper.
 func (g *fairinoGripper) GoToInputs(ctx context.Context, inputs ...[]referenceframe.Input) error {
+	ctx, done := g.opMgr.New(ctx)
+	defer done()
 	for _, in := range inputs {
 		if err := g.moveGripper(ctx, int(inputsToPercent(in, g.strokeMM))); err != nil {
 			return err
@@ -512,19 +514,21 @@ func (g *fairinoGripper) Status(ctx context.Context) (map[string]any, error) {
 	if err != nil {
 		return map[string]any{"error": err.Error()}, nil
 	}
+	holding, dropped, detectable := decodeGripperHold(g.vendor, fr.GripperMotionDone)
 	return map[string]any{
-		"position":     fr.GripperPosition,
-		"motion_done":  fr.GripperMotionDone,
-		"holding":      fr.GripperMotionDone == gripperMotionClamped,
-		"dropped":      fr.GripperMotionDone == gripperMotionDropped,
-		"active":       fr.GripperActive,
-		"fault":        fr.GripperFault,
-		"fault_id":     fr.GripperFaultID,
-		"speed":        fr.GripperSpeed,
-		"current":      fr.GripperCurrent,
-		"temperature":  fr.GripperTemp,
-		"voltage":      fr.GripperVoltage,
-		"frame_age_ms": time.Since(fr.ReceivedAt).Milliseconds(),
+		"position":       fr.GripperPosition,
+		"motion_done":    fr.GripperMotionDone,
+		"holding":        holding,
+		"dropped":        dropped,
+		"hold_detection": detectable,
+		"active":         fr.GripperActive,
+		"fault":          fr.GripperFault,
+		"fault_id":       fr.GripperFaultID,
+		"speed":          fr.GripperSpeed,
+		"current":        fr.GripperCurrent,
+		"temperature":    fr.GripperTemp,
+		"voltage":        fr.GripperVoltage,
+		"frame_age_ms":   time.Since(fr.ReceivedAt).Milliseconds(),
 	}, nil
 }
 
@@ -550,6 +554,7 @@ func (g *fairinoGripper) Close(ctx context.Context) error {
 //   - "deactivate": ActGripper(index, 0)
 //   - "set_config": SetGripperConfig using company/device/software_version/bus keys
 //   - "move": MoveGripper to "position" (0-100), optional "speed"/"force"
+//     (1-100), which become the defaults for later moves too
 //   - "diag": config + robot error codes + the raw gripper status fields
 //
 // "software_version" and "reset_error" are gone with the XML-RPC transport:
@@ -608,19 +613,7 @@ func (g *fairinoGripper) DoCommand(ctx context.Context, cmd map[string]any) (map
 		}
 		return map[string]any{"ok": true}, nil
 	case "move":
-		pos := intFromCmd(cmd, "position")
-		g.paramMu.Lock()
-		if s := intFromCmd(cmd, "speed"); s > 0 {
-			g.speed = s
-		}
-		if f := intFromCmd(cmd, "force"); f > 0 {
-			g.force = f
-		}
-		g.paramMu.Unlock()
-		if err := g.moveGripper(ctx, pos); err != nil {
-			return nil, err
-		}
-		return map[string]any{"ok": true, "position": pos}, nil
+		return g.move(ctx, cmd)
 	case "set_speed_force":
 		return g.setSpeedForce(cmd)
 	case "get_speed_force":
@@ -629,8 +622,8 @@ func (g *fairinoGripper) DoCommand(ctx context.Context, cmd map[string]any) (map
 	case "grab_with_force":
 		return g.grabWithForce(ctx, cmd)
 	default:
-		return nil, fmt.Errorf("unknown command %q (supported: gripper_config, status, activate, deactivate, "+
-			"set_config, move, set_speed_force, get_speed_force, grab_with_force, diag)", command)
+		return nil, fmt.Errorf("%w %q (supported: gripper_config, status, activate, deactivate, "+
+			"set_config, move, set_speed_force, get_speed_force, grab_with_force, diag)", errUnknownCommand, command)
 	}
 }
 

@@ -3,7 +3,10 @@ package viamfairino
 import (
 	"fmt"
 
+	"github.com/golang/geo/r3"
+	"go.viam.com/rdk/components/gripper"
 	"go.viam.com/rdk/referenceframe"
+	"go.viam.com/rdk/spatialmath"
 )
 
 // VacuumGripperConfig says which digital IO the vacuum is wired to.
@@ -58,20 +61,19 @@ func (cfg *VacuumGripperConfig) Validate(path string) ([]string, []string, error
 	return nil, nil, nil
 }
 
-// makeVacuumModel is a 0-DoF model carrying the suction cup's geometry, if any.
+// makeVacuumModel is a 0-DoF model carrying the suction cup's geometry, if any:
+// a 20 mm square box lengthMM long, from the flange out along Z.
 func makeVacuumModel(name string, lengthMM float64) (referenceframe.Model, error) {
-	geometry := ""
+	var geometries []spatialmath.Geometry
 	if lengthMM > 0 {
-		geometry = fmt.Sprintf(`, "geometry": {"type": "box", "x": 20, "y": 20, "z": %g, "translation": {"X": 0, "Y": 0, "Z": %g}, "label": "suction_cup"}`,
-			lengthMM, lengthMM/2)
+		cup, err := spatialmath.NewBox(spatialmath.NewPoseFromPoint(r3.Vector{Z: lengthMM / 2}),
+			r3.Vector{X: 20, Y: 20, Z: lengthMM}, "suction_cup")
+		if err != nil {
+			return nil, fmt.Errorf("building vacuum gripper model: %w", err)
+		}
+		geometries = append(geometries, cup)
 	}
-	doc := fmt.Sprintf(`{"name": %q, "kinematic_param_type": "SVA",
-  "links": [{"id": "vacuum_base", "parent": "world", "translation": {"X": 0, "Y": 0, "Z": 0}%s}]}`, name, geometry)
-	model, err := referenceframe.UnmarshalModelJSON([]byte(doc), name)
-	if err != nil {
-		return nil, fmt.Errorf("building vacuum gripper model: %w", err)
-	}
-	return model, nil
+	return gripper.MakeModel(name, geometries)
 }
 
 // digitalBit reads one digital input or output from the status feed

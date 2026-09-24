@@ -90,7 +90,7 @@ This module provides the following model(s):
 | `motion` | string | no | Name of the `motion.Service` `MoveToPosition` delegates to. Defaults to this robot's `"builtin"` motion service if available (optional dependency); naming one explicitly makes it a hard dependency instead. See the Cartesian motion section above. |
 | `bad_joints` | []int | no | Joints (0-5) that can't move. Each is locked to about the position it reports at startup (±1°, clamped to its own range) in the published kinematics, so the motion service plans around it. Requires the arm to be reachable at startup (construction waits up to 15 s for its position). With `use_urdf` the lock only applies to this module's own checks, since URDF kinematics can't carry it. |
 | `collision_level` / `collision_levels` | int / []int | no | Collision detection level applied at startup (`SetAnticollision`): one level for every joint, or 6 per-joint levels. 1 (most sensitive) to 10 — the controller's own scale, the reverse of viam-ufactory-xarm's `collision_sensitivity`. Not saved to the controller's configuration; reapplied on every start and every reconnection to the controller (so a controller restart can't bring back its saved levels), and startup fails if it can't be applied. While a reconnection can't apply it, no command but `STOP` is sent. Unset leaves the controller's levels alone. |
-| `webapp_proxy` / `webapp_proxy_port` / `webapp_url` | bool / int / string | no | Start a local reverse proxy to the controller's WebApp on `webapp_proxy_port` (default 18080), so it's reachable at `http://<viam-server-host>:18080` when the controller is only on a private link. Targets `https://<host>` unless `webapp_url` says otherwise; the controller's self-signed certificate isn't verified. **No authentication**: anyone who can reach the port can drive the arm — only enable it on a trusted network. |
+| `webapp_proxy` / `webapp_proxy_port` / `webapp_url` | bool / int / string | no | Start a local reverse proxy to the controller's WebApp on `webapp_proxy_port` (default 18080), so it's reachable at `http://<viam-server-host>:18080` when the controller is only on a private link. Targets `https://<host>` unless `webapp_url` says otherwise; the controller's self-signed certificate isn't verified. **No authentication**: anyone who can reach the port can drive the arm — only enable it on a trusted network. Disabling it (or removing the arm) closes open WebApp sessions too. |
 | `blend_time_ms` | int | no | `MoveJ`'s non-blocking `blendT` field, 0-500. Default 0 (disabled): every waypoint decelerates to a full stop before the next, the original behavior. A nonzero value blends through every waypoint but the last in a multi-waypoint move (`MoveThroughJointPositions`, and therefore `GoToInputs`/`MoveToPosition` too, since both delegate to it) instead of stopping at each — see the blending caveat below. |
 
 The controller's ports are fixed by firmware (status 8083, commands 8080) and
@@ -232,8 +232,8 @@ reports zeros, so `Readings` returns an error instead of zeros.
 
 | DoCommand | Effect |
 |---|---|
-| `{"command": "tare"}` | `FT_SetZero(1)`: zero at the current load. Hold the arm still at the unloaded reference pose first. |
-| `{"command": "clear_tare"}` | `FT_SetZero(0)`: remove the zero offset |
+| `{"command": "tare"}` | `FT_SetZero(1,0)`: zero at the current load. Hold the arm still at the unloaded reference pose first. |
+| `{"command": "clear_tare"}` | `FT_SetZero(0,0)`: remove the zero offset |
 | `{"command": "activate"}` / `{"command": "deactivate"}` | `FT_Activate(1/0)` |
 
 ## Vacuum gripper
@@ -251,7 +251,10 @@ reports zeros, so `Readings` returns an error instead of zeros.
 | `sensor_input` | int | no | Vacuum-switch input that is on while a part is held. `Grab` waits up to 1 s for it. Without it, `IsHoldingSomething` reports whether suction is on (`Meta.source` says which). |
 | `length_mm` | float | no | Adds a suction-cup collision box this long along Z. |
 
-`Close` leaves suction as it is, so a module restart doesn't drop a held part.
+`Grab` and `Open` run one at a time (a new one supersedes one in flight, and
+`Stop` cancels it), so their output sequences never interleave; `Grab` only
+trusts status frames captured after suction came on. `Close` leaves suction
+as it is, so a module restart doesn't drop a held part.
 
 ## Gripper methods
 
@@ -266,7 +269,7 @@ reports zeros, so `Readings` returns an error instead of zeros.
 | `DoCommand` | ✅ `gripper_config`, `status`, `activate`, `deactivate`, `set_config`, `move`, `diag`, `set_speed_force`, `get_speed_force`, `grab_with_force` (see below) |
 
 `{"command": "set_speed_force", "speed_percent": 30, "force_percent": 80}`
-changes the default speed and/or force for later moves; `get_speed_force`
+changes the default speed and/or force (1-100) for later moves; `get_speed_force`
 returns them. `{"command": "grab_with_force", "position": 0, "speed_percent":
 30, "force_percent": 90}` grabs once at that speed/force without changing the
 defaults (every key optional) and returns `holding` — the counterpart of

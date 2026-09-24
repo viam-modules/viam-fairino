@@ -224,7 +224,7 @@ func (cfg *Config) Validate(path string) ([]string, []string, error) {
 	if v := cfg.WebAppProxyPort; v < 0 || v > 65535 {
 		return nil, nil, fmt.Errorf("%s: webapp_proxy_port must be a TCP port, got %d", path, v)
 	}
-	if _, err := webAppProxyTarget(cfg.WebAppURL, "controller"); err != nil {
+	if err := validateWebAppURL(cfg.WebAppURL); err != nil {
 		return nil, nil, fmt.Errorf("%s: %w", path, err)
 	}
 
@@ -482,11 +482,7 @@ func (s *viamFairinoFairino) Name() resource.Name {
 // latestFrame fetches the latest status frame, blocking briefly if none has
 // arrived yet (typical right after startup).
 func (s *viamFairinoFairino) latestFrame(ctx context.Context) (statusFrame, error) {
-	fr, ok, _ := s.status.latest()
-	if ok {
-		return fr, nil
-	}
-	return s.status.waitForFrame(ctx)
+	return s.status.await(ctx)
 }
 
 // JointPositions returns the current joint positions of the arm.
@@ -513,11 +509,8 @@ func (s *viamFairinoFairino) CurrentInputs(ctx context.Context) ([]referencefram
 // moves reported as done, fold in program_state == running and/or joint-delta
 // detection. See PLAN.md, Risks #3.
 func (s *viamFairinoFairino) IsMoving(ctx context.Context) (bool, error) {
-	fr, ok, err := s.status.latest()
-	if !ok {
-		if err == nil {
-			err = errors.New("no status frame received yet")
-		}
+	fr, err := s.status.current()
+	if err != nil {
 		return false, err
 	}
 	return !fr.MotionDone, nil
@@ -528,12 +521,9 @@ func (s *viamFairinoFairino) IsMoving(ctx context.Context) (bool, error) {
 // is down (which surfaces the resource as unhealthy in the machine status
 // API rather than only failing lazily on use).
 func (s *viamFairinoFairino) Status(ctx context.Context) (map[string]interface{}, error) {
-	fr, ok, err := s.status.latest()
-	if !ok {
-		if err == nil {
-			err = errors.New("no status frame received yet")
-		}
-		return nil, fmt.Errorf("status stream down: %w", err)
+	fr, err := s.status.current()
+	if err != nil {
+		return nil, err
 	}
 	return map[string]interface{}{
 		"connected":         true,
@@ -627,7 +617,7 @@ func statusDump(fr statusFrame) map[string]interface{} {
 		"cl_dgt_input_h":    float64(p[offClDgtInputH]),
 		"cl_dgt_input_l":    float64(p[offClDgtInputL]),
 		"tl_dgt_input_l":    float64(p[offTlDgtInputL]),
-		"ft_data":           ftData(p),
+		"ft_data":           floatSlice(fr.FTData[:]),
 		"ft_act_status":     float64(p[offFTActStatus]),
 		"emergency_stop":    fr.EmergencyStop,
 		"robot_motion_done": fr.MotionDone,
@@ -641,14 +631,6 @@ func floatSlice(vals []float64) []interface{} {
 	out := make([]interface{}, len(vals))
 	for i, v := range vals {
 		out[i] = v
-	}
-	return out
-}
-
-func ftData(payload []byte) []interface{} {
-	out := make([]interface{}, 6)
-	for i := 0; i < 6; i++ {
-		out[i] = readF64(payload, offFTData+i*8)
 	}
 	return out
 }

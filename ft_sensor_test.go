@@ -4,10 +4,14 @@ import (
 	"context"
 	"encoding/binary"
 	"math"
+	"net"
+	"strconv"
 	"testing"
 
 	"go.viam.com/rdk/components/sensor"
 	"go.viam.com/rdk/logging"
+	"go.viam.com/rdk/operation"
+	"go.viam.com/rdk/resource"
 )
 
 func newTestFTSensor(t *testing.T, fc *fakeController, activated bool) *fairinoFTSensor {
@@ -75,5 +79,34 @@ func TestFTSensorDoCommand(t *testing.T) {
 	}
 	if _, err := s.DoCommand(context.Background(), map[string]interface{}{"command": "nope"}); err == nil {
 		t.Error("expected an error for an unknown command")
+	}
+}
+
+// Every resource on a controller shares its connections by reference count,
+// so a repeated Close must not drop a sibling's reference.
+func TestWrapperClosesAreIdempotent(t *testing.T) {
+	const host = "203.0.113.4" // TEST-NET-3: the shared client connects lazily, and never does here
+	for name, closer := range map[string]resource.Resource{
+		"gripper":        &fairinoGripper{host: host, opMgr: operation.NewSingleOperationManager()},
+		"vacuum_gripper": &fairinoVacuumGripper{host: host, opMgr: operation.NewSingleOperationManager()},
+		"ft_sensor":      &fairinoFTSensor{host: host},
+	} {
+		t.Run(name, func(t *testing.T) {
+			logger := logging.NewTestLogger(t)
+			acquireCommandClient(host, commandPort, logger) // this resource's
+			acquireCommandClient(host, commandPort, logger) // a sibling's
+			defer releaseCommandClient(host, commandPort)
+			for range 2 {
+				if err := closer.Close(context.Background()); err != nil {
+					t.Fatal(err)
+				}
+			}
+			sharedCommandMu.Lock()
+			e, ok := sharedCommandClients[net.JoinHostPort(host, strconv.Itoa(commandPort))]
+			sharedCommandMu.Unlock()
+			if !ok || e.refs != 1 {
+				t.Error("a second Close released the sibling's reference")
+			}
+		})
 	}
 }

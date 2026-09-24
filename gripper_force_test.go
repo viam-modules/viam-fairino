@@ -2,6 +2,7 @@ package viamfairino
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 )
@@ -90,5 +91,53 @@ func TestGripperGrabWithForce(t *testing.T) {
 	}
 	if speed, force := g.speedForce(); speed != 50 || force != 50 {
 		t.Errorf("defaults changed to %d/%d", speed, force)
+	}
+}
+
+// Status must decode gripper_motion_done the same way IsHoldingSomething
+// does, per vendor.
+func TestGripperStatusDecodesPerVendor(t *testing.T) {
+	g := newTestGripper(t, frameWith(t, robotiqStoppedNoObjectFound, 100))
+	g.vendor = gripperVendorRobotiq
+	st, err := g.Status(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st["holding"] != false || st["dropped"] != false || st["hold_detection"] != true {
+		t.Errorf("robotiq 'no object found': got %v", st)
+	}
+	g = newTestGripper(t, frameWith(t, gripperMotionClamped, 20))
+	g.vendor = gripperVendorHuiling
+	if st, _ := g.Status(context.Background()); st["holding"] != false || st["hold_detection"] != false {
+		t.Errorf("huiling can't detect a hold: got %v", st)
+	}
+}
+
+// DoCommand integers are validated, not coerced: "50" isn't position 0
+// (fully closed), and a 0% or 150% speed is refused rather than kept as the
+// default for every later move.
+func TestGripperDoCommandValidation(t *testing.T) {
+	fc := newFakeController(t)
+	g := newCommandGripper(t, fc, frameWith(t, gripperMotionStopped, 50))
+	for _, bad := range []map[string]any{
+		{"command": "move"},
+		{"command": "move", "position": "50"},
+		{"command": "move", "position": 50.0, "speed": 150.0},
+		{"command": "move", "position": 50.0, "force": 0.0},
+		{"command": "set_speed_force", "speed_percent": 0.0},
+		{"command": "grab_with_force", "force_percent": 0.0},
+	} {
+		if _, err := g.DoCommand(context.Background(), bad); err == nil {
+			t.Errorf("%v: expected an error", bad)
+		}
+	}
+	if sent := fc.sent(); len(sent) != 0 {
+		t.Errorf("sent %v for invalid commands", sent)
+	}
+	if speed, force := g.speedForce(); speed != 50 || force != 50 {
+		t.Errorf("defaults changed to %d/%d", speed, force)
+	}
+	if _, err := g.DoCommand(context.Background(), map[string]any{"command": "nope"}); !errors.Is(err, errUnknownCommand) {
+		t.Errorf("unknown command: got %v", err)
 	}
 }

@@ -9,12 +9,12 @@ package viamfairino
 import (
 	"context"
 	"errors"
-	"fmt"
-	"sync/atomic"
+	"sync"
 	"time"
 
 	"go.viam.com/rdk/components/gripper"
 	"go.viam.com/rdk/logging"
+	"go.viam.com/rdk/operation"
 	"go.viam.com/rdk/referenceframe"
 	"go.viam.com/rdk/resource"
 	"go.viam.com/rdk/spatialmath"
@@ -42,7 +42,12 @@ type fairinoVacuumGripper struct {
 	status *statusClient
 	model  referenceframe.Model
 
-	moving atomic.Bool
+	// opMgr makes Grab and Open one operation at a time, as for the finger
+	// gripper: each switches two outputs in turn, and two interleaved
+	// sequences could leave suction and the release valve both on.
+	opMgr *operation.SingleOperationManager
+
+	closeOnce sync.Once
 }
 
 func newVacuumGripper(ctx context.Context, _ resource.Dependencies, rawConf resource.Config, logger logging.Logger) (gripper.Gripper, error) {
@@ -66,15 +71,15 @@ func newVacuumGripper(ctx context.Context, _ resource.Dependencies, rawConf reso
 		cmd:    acquireCommandClient(host, commandPort, logger),
 		status: acquireStatusClient(ctx, host, statusPort, logger),
 		model:  model,
+		opMgr:  operation.NewSingleOperationManager(),
 	}, nil
 }
 
 // setSuction turns suction on or off, driving the release output opposite.
-// The release valve closes before suction starts and opens only after it stops,
-// so the two never fight.
+// The release valve closes before suction starts and opens only after it
+// stops, so the two never fight; callers hold the operation (opMgr), so no
+// other sequence interleaves, and one cancelled partway sends nothing more.
 func (g *fairinoVacuumGripper) setSuction(ctx context.Context, on bool) error {
-	g.moving.Store(true)
-	defer g.moving.Store(false)
 	if on && g.cfg.ReleaseOutput != nil {
 		if err := g.cmd.setDO(ctx, !g.cfg.box(), *g.cfg.ReleaseOutput, false); err != nil {
 			return err
@@ -92,6 +97,8 @@ func (g *fairinoVacuumGripper) setSuction(ctx context.Context, on bool) error {
 // Grab turns suction on. It reports whether a part is held when there is a
 // sensor input to tell; without one it can only report that suction is on.
 func (g *fairinoVacuumGripper) Grab(ctx context.Context, extra map[string]any) (bool, error) {
+	ctx, done := g.opMgr.New(ctx)
+	defer done()
 	if err := g.setSuction(ctx, true); err != nil {
 		return false, err
 	}
@@ -99,17 +106,27 @@ func (g *fairinoVacuumGripper) Grab(ctx context.Context, extra map[string]any) (
 		return true, nil
 	}
 	// Vacuum takes a moment to build, and the status feed trails the output
-	// by up to a period, so give the switch a moment before reporting a miss.
-	deadline := time.Now().Add(vacuumSettleTimeout)
+	// by up to a period, so only frames captured after suction came on count,
+	// and a miss is reported only once the switch has had time to close.
+	switchedAt := time.Now()
+	deadline := switchedAt.Add(vacuumSettleTimeout)
 	for {
-		st, err := g.IsHoldingSomething(ctx, extra)
-		if err != nil || st.IsHoldingSomething || time.Now().After(deadline) {
-			return st.IsHoldingSomething, err
+		fr, err := g.status.await(ctx)
+		if err != nil {
+			return false, err
 		}
-		select {
-		case <-ctx.Done():
+		fresh := fr.ReceivedAt.After(switchedAt)
+		if fresh && g.holding(fr) {
+			return true, nil
+		}
+		if fresh && time.Now().After(deadline) {
+			return false, nil
+		}
+		if time.Since(switchedAt) > vacuumSettleTimeout+statusFeedLostTimeout {
+			return false, errors.New("no status frame since suction came on: the status feed is stalled")
+		}
+		if !sleepCtx(ctx, motionPollInterval) {
 			return false, ctx.Err()
-		case <-time.After(motionPollInterval):
 		}
 	}
 }
@@ -119,37 +136,51 @@ const vacuumSettleTimeout = time.Second
 
 // Open turns suction off (and the release output on, if configured).
 func (g *fairinoVacuumGripper) Open(ctx context.Context, extra map[string]any) error {
+	ctx, done := g.opMgr.New(ctx)
+	defer done()
 	return g.setSuction(ctx, false)
+}
+
+// holding reads the sensor input if configured, else the suction output.
+func (g *fairinoVacuumGripper) holding(fr statusFrame) bool {
+	if g.cfg.SensorInput != nil {
+		return digitalBit(fr, g.cfg.box(), true, *g.cfg.SensorInput)
+	}
+	return digitalBit(fr, g.cfg.box(), false, g.cfg.SuctionOutput)
+}
+
+// source names what holding reads, for Meta and Status.
+func (g *fairinoVacuumGripper) source() string {
+	if g.cfg.SensorInput != nil {
+		return "sensor_input"
+	}
+	return "suction_output"
 }
 
 // IsHoldingSomething reads the sensor input if configured, else the suction
 // output; Meta["source"] says which.
 func (g *fairinoVacuumGripper) IsHoldingSomething(ctx context.Context, extra map[string]any) (gripper.HoldingStatus, error) {
-	fr, ok, err := g.status.latest()
-	if !ok {
-		if err == nil {
-			err = errors.New("no status frame received yet")
-		}
-		return gripper.HoldingStatus{}, fmt.Errorf("status stream down: %w", err)
+	fr, err := g.status.await(ctx)
+	if err != nil {
+		return gripper.HoldingStatus{}, err
 	}
-	if g.cfg.SensorInput != nil {
-		return gripper.HoldingStatus{
-			IsHoldingSomething: digitalBit(fr, g.cfg.box(), true, *g.cfg.SensorInput),
-			Meta:               map[string]any{"source": "sensor_input"},
-		}, nil
-	}
-	return gripper.HoldingStatus{
-		IsHoldingSomething: digitalBit(fr, g.cfg.box(), false, g.cfg.SuctionOutput),
-		Meta:               map[string]any{"source": "suction_output"},
-	}, nil
+	return gripper.HoldingStatus{IsHoldingSomething: g.holding(fr), Meta: map[string]any{"source": g.source()}}, nil
 }
 
 func (g *fairinoVacuumGripper) Name() resource.Name { return g.name }
 
-func (g *fairinoVacuumGripper) IsMoving(context.Context) (bool, error) { return g.moving.Load(), nil }
+// IsMoving is true while a Grab or Open is switching outputs or, for Grab,
+// waiting for the vacuum switch.
+func (g *fairinoVacuumGripper) IsMoving(context.Context) (bool, error) {
+	return g.opMgr.OpRunning(), nil
+}
 
-// Stop has nothing to halt: suction switches instantly.
-func (g *fairinoVacuumGripper) Stop(context.Context, map[string]any) error { return nil }
+// Stop cancels an in-flight Grab or Open, which then sends nothing more.
+// The outputs stay as they were last switched.
+func (g *fairinoVacuumGripper) Stop(ctx context.Context, _ map[string]any) error {
+	g.opMgr.CancelRunning(ctx)
+	return nil
+}
 
 func (g *fairinoVacuumGripper) Geometries(ctx context.Context, _ map[string]any) ([]spatialmath.Geometry, error) {
 	gif, err := g.model.Geometries(nil)
@@ -171,22 +202,28 @@ func (g *fairinoVacuumGripper) GoToInputs(ctx context.Context, inputs ...[]refer
 	return nil
 }
 
+// DoCommand has no commands: the vacuum gripper is all Grab and Open.
 func (g *fairinoVacuumGripper) DoCommand(ctx context.Context, cmd map[string]any) (map[string]any, error) {
-	return nil, fmt.Errorf("%w %q: the vacuum gripper has no DoCommands", errUnknownCommand, cmd["command"])
+	return nil, resource.ErrDoUnimplemented
 }
 
 func (g *fairinoVacuumGripper) Status(ctx context.Context) (map[string]any, error) {
-	st, err := g.IsHoldingSomething(ctx, nil)
+	fr, err := g.status.current()
 	if err != nil {
 		return nil, err
 	}
-	return map[string]any{"holding": st.IsHoldingSomething, "source": st.Meta["source"]}, nil
+	return map[string]any{"holding": g.holding(fr), "source": g.source()}, nil
 }
 
 // Close leaves suction as it is: dropping a held part because the module
-// restarted would be worse than keeping it.
+// restarted would be worse than keeping it. It releases the shared
+// connections once: the references are shared with the other resources on
+// this controller.
 func (g *fairinoVacuumGripper) Close(ctx context.Context) error {
-	releaseStatusClient(g.host, statusPort)
-	releaseCommandClient(g.host, commandPort)
+	g.closeOnce.Do(func() {
+		g.opMgr.CancelRunning(ctx)
+		releaseStatusClient(g.host, statusPort)
+		releaseCommandClient(g.host, commandPort)
+	})
 	return nil
 }

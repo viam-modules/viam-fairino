@@ -193,6 +193,8 @@ type statusFrame struct {
 	TCPPose       [6]float64 // tl_cur_pos, x,y,z mm + a,b,c deg
 	ToolNum       int32
 	JointTorques  [6]float64 // jt_cur_tor, N·m
+	FTData        [6]float64 // FT_data: Fx,Fy,Fz N + Tx,Ty,Tz N·m
+	FTActive      bool       // FT_ActStatus == 1
 	ProgramName   string
 	EmergencyStop bool
 	MotionDone    bool // robot_motion_done == 1 ("in place")
@@ -241,7 +243,9 @@ func parseStatus(payload []byte, frameCount uint8) (statusFrame, bool) {
 		fr.JointDegs[i] = readF64(payload, offJointPos+i*8)
 		fr.TCPPose[i] = readF64(payload, offTCPPose+i*8)
 		fr.JointTorques[i] = readF64(payload, offJointTorque+i*8)
+		fr.FTData[i] = readF64(payload, offFTData+i*8)
 	}
+	fr.FTActive = payload[offFTActStatus] == 1
 	if len(payload) >= minGripperPayloadLen {
 		fr.GripperValid = true
 		fr.GripperMotionDone = payload[offGripperMotionDone]
@@ -310,6 +314,10 @@ const (
 	cmdIDSetAnticollision = 305 // §5.4.4, Table 5-4-4
 	cmdIDSetDO            = 204 // §3.1.1, Table 3-1-1
 	cmdIDSetToolDO        = 210 // §3.1.4, Table 3-1-3
+
+	// Force/torque sensor commands, manual chapter 7.2.
+	cmdIDFTActivate = 524 // §7.2.3, Table 7-2-3
+	cmdIDFTSetZero  = 528 // §7.2.7, Table 7-2-7
 
 	// cmdIDGetSoftwareVersion sends "GetSoftwareVersion()"; the response DATA
 	// is "<robotModel>,<webVersion>,<controllerVersion>" (verified against an

@@ -2,7 +2,7 @@ package viamfairino
 
 import (
 	"context"
-	"fmt"
+	"errors"
 )
 
 // Gripper vendors whose gripper_motion_done encoding is known (8083 manual
@@ -35,45 +35,66 @@ func decodeGripperHold(vendor string, motionDone uint8) (holding, dropped, detec
 	}
 }
 
-// percentArg reads an optional 0-100 percentage from a DoCommand; ok is false
-// when the key is absent.
-func percentArg(cmd map[string]any, key string) (v int, ok bool, err error) {
-	f, ok := floatArg(cmd, key)
+// Speed and force are 1-100%: 0 would never move or never grip, so it's
+// refused rather than stored as a default (config's 0 means "unset").
+const minSpeedForcePercent = 1
+
+// move handles {"command": "move", "position": N, "speed": N, "force": N}:
+// position is required; speed/force, if given, become the defaults for later
+// moves too.
+func (g *fairinoGripper) move(ctx context.Context, cmd map[string]any) (map[string]any, error) {
+	pos, ok, err := intArg(cmd, "position", 0, 100)
+	if err != nil {
+		return nil, err
+	}
 	if !ok {
-		if _, present := cmd[key]; present {
-			return 0, false, fmt.Errorf("%s must be a number", key)
-		}
-		return 0, false, nil
+		return nil, errors.New(`move needs a "position" from 0 to 100`)
 	}
-	if f < 0 || f > 100 || f != float64(int(f)) {
-		return 0, false, fmt.Errorf("%s must be an integer from 0 to 100, got %v", key, f)
+	speed, hasSpeed, err := intArg(cmd, "speed", minSpeedForcePercent, 100)
+	if err != nil {
+		return nil, err
 	}
-	return int(f), true, nil
+	force, hasForce, err := intArg(cmd, "force", minSpeedForcePercent, 100)
+	if err != nil {
+		return nil, err
+	}
+	g.setDefaults(speed, hasSpeed, force, hasForce)
+	ctx, done := g.opMgr.New(ctx)
+	defer done()
+	if err := g.moveGripper(ctx, pos); err != nil {
+		return nil, err
+	}
+	return map[string]any{"ok": true, "position": pos}, nil
 }
 
-// setSpeedForce handles {"command": "set_speed_force", "speed_percent": N,
-// "force_percent": N}: either or both become the default for later moves.
-func (g *fairinoGripper) setSpeedForce(cmd map[string]any) (map[string]any, error) {
-	speed, hasSpeed, err := percentArg(cmd, "speed_percent")
-	if err != nil {
-		return nil, err
-	}
-	force, hasForce, err := percentArg(cmd, "force_percent")
-	if err != nil {
-		return nil, err
-	}
-	if !hasSpeed && !hasForce {
-		return nil, fmt.Errorf(`set_speed_force needs "speed_percent" and/or "force_percent"`)
-	}
+// setDefaults updates the default speed and/or force, returning both.
+func (g *fairinoGripper) setDefaults(speed int, hasSpeed bool, force int, hasForce bool) (int, int) {
 	g.paramMu.Lock()
+	defer g.paramMu.Unlock()
 	if hasSpeed {
 		g.speed = speed
 	}
 	if hasForce {
 		g.force = force
 	}
-	speed, force = g.speed, g.force
-	g.paramMu.Unlock()
+	return g.speed, g.force
+}
+
+// setSpeedForce handles {"command": "set_speed_force", "speed_percent": N,
+// "force_percent": N}: either or both become the default for later moves.
+func (g *fairinoGripper) setSpeedForce(cmd map[string]any) (map[string]any, error) {
+	speed, hasSpeed, err := intArg(cmd, "speed_percent", minSpeedForcePercent, 100)
+	if err != nil {
+		return nil, err
+	}
+	force, hasForce, err := intArg(cmd, "force_percent", minSpeedForcePercent, 100)
+	if err != nil {
+		return nil, err
+	}
+	if !hasSpeed && !hasForce {
+		return nil, errors.New(`set_speed_force needs "speed_percent" and/or "force_percent"`)
+	}
+	speed, force = g.setDefaults(speed, hasSpeed, force, hasForce)
 	return map[string]any{"speed_percent": speed, "force_percent": force}, nil
 }
 
@@ -84,13 +105,17 @@ func (g *fairinoGripper) setSpeedForce(cmd map[string]any) (map[string]any, erro
 func (g *fairinoGripper) grabWithForce(ctx context.Context, cmd map[string]any) (map[string]any, error) {
 	speed, force := g.speedForce()
 	pos := g.grabPos
-	for key, dst := range map[string]*int{"position": &pos, "speed_percent": &speed, "force_percent": &force} {
-		v, ok, err := percentArg(cmd, key)
+	for _, arg := range []struct {
+		key string
+		lo  int
+		dst *int
+	}{{"position", 0, &pos}, {"speed_percent", minSpeedForcePercent, &speed}, {"force_percent", minSpeedForcePercent, &force}} {
+		v, ok, err := intArg(cmd, arg.key, arg.lo, 100)
 		if err != nil {
 			return nil, err
 		}
 		if ok {
-			*dst = v
+			*arg.dst = v
 		}
 	}
 

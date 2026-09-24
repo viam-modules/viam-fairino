@@ -925,6 +925,19 @@ func (c *commandClient) setDO(ctx context.Context, tool bool, index int, on bool
 	return c.sendAck(ctx, cmdID, fmt.Sprintf("%s(%d,%d,0,1)", name, index, boolInt(on)))
 }
 
+// ftActivate sends FT_Activate() (§7.2.3, CMD_ID 524): 1 activates the
+// force/torque sensor, 0 resets it.
+func (c *commandClient) ftActivate(ctx context.Context, on bool) error {
+	return c.sendAck(ctx, cmdIDFTActivate, fmt.Sprintf("FT_Activate(%d)", boolInt(on)))
+}
+
+// ftSetZero sends FT_SetZero() (§7.2.7, CMD_ID 528): zero=true zeroes the
+// sensor at its current load, false removes the zero offset. The second
+// argument is 0, as the module has always sent it.
+func (c *commandClient) ftSetZero(ctx context.Context, zero bool) error {
+	return c.sendAck(ctx, cmdIDFTSetZero, fmt.Sprintf("FT_SetZero(%d,0)", boolInt(zero)))
+}
+
 // getRobotErrorCode sends GetRobotErrorCode() (§6.3.16, CMD_ID 1163) and
 // returns (mainCode, subCode). Its response has no leading errcode either.
 func (c *commandClient) getRobotErrorCode(ctx context.Context) (mainCode, subCode int, err error) {
