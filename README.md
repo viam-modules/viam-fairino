@@ -154,6 +154,14 @@ go run ./cmd/fairino-test -host <ip> gripper open|close|move <0-100>
 | `EndPosition` | ✅ via forward kinematics — see its doc comment for a still-open design question (device-reported pose vs. FK) |
 | `Stop` | ✅ cancels any in-flight move and sends `STOP` |
 
+`STOP` goes ahead of anything else waiting for the command connection (which
+the arm shares with the gripper and other components on the same controller),
+and is sent even for a request whose context has ended. A move that is
+cancelled, or fails, after its `MoveJ` reached the controller sends `STOP` on
+the way out, including any blended waypoints still queued. A move is also
+abandoned, and the arm stopped, if the status feed goes quiet for a second
+mid-move, or if it runs far past its expected duration.
+
 Moves are refused up front while the controller is e-stopped or latched in a
 fault, with the fault decoded (including `GetRobotErrorCode`'s main/sub
 codes). The documented command protocol has no command to clear a fault, so
@@ -178,13 +186,18 @@ controller's drag-teach (free-drive) mode. This uses an undocumented command
 
 | Method | Status |
 |---|---|
-| `Open` / `Grab` | ✅ blocking `MoveGripper` to the configured open/grab position |
+| `Open` / `Grab` | ✅ `MoveGripper` to the configured open/grab position, waiting on the status feed until the fingers stop |
 | `IsHoldingSomething` | ✅ from the status feed's `gripper_motion_done` (DH encoding: 2 = clamped, 3 = clamped then dropped) |
 | `CurrentInputs` / `Kinematics` / `Geometries` | ✅ fingers render at the live gripper position |
 | `GoToInputs` | ✅ maps finger travel back to a percentage |
 | `IsMoving` | ✅ true while an `Open`/`Grab` is in flight |
 | `Stop` | ⚠️ cancels the in-flight call; the controller has no gripper-stop command |
 | `DoCommand` | ✅ `gripper_config`, `status`, `activate`, `deactivate`, `set_config`, `move`, `diag` |
+
+`MoveGripper` is sent non-blocking and followed on the status feed: a
+blocking one isn't acknowledged until the fingers stop, and would hold the
+command connection it shares with the arm — and so the arm's `STOP` — for the
+whole motion.
 
 Gripper *commands* go to port 8080 (manual chapter 7.1: `SetGripperConfig`,
 `GetGripperConfig`, `ActGripper`, `MoveGripper`); gripper *state* comes from the

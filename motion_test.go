@@ -3,7 +3,12 @@ package viamfairino
 import (
 	"context"
 	"errors"
+	"fmt"
+	"math"
+	"net"
+	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -167,13 +172,15 @@ func TestCloseStopsInFlightMove(t *testing.T) {
 	if err := s.Close(context.Background()); err != nil {
 		t.Fatal(err)
 	}
+	// Close waits for the move's operation to end, which the move goroutine
+	// then reports a moment later, so this can't be a non-blocking check.
 	select {
 	case err := <-errCh:
 		if !errors.Is(err, context.Canceled) {
 			t.Errorf("move returned %v, want context.Canceled", err)
 		}
-	default:
-		t.Fatal("Close returned before the in-flight move did")
+	case <-time.After(5 * time.Second):
+		t.Fatal("move did not return after Close")
 	}
 	if fc.count("STOP") == 0 {
 		t.Errorf("no STOP sent on Close; commands %v", fc.sent())
@@ -199,11 +206,169 @@ func TestSendRefusesCancelledContext(t *testing.T) {
 	s, _ := newControllerTestArm(t, fc, restingFrame([6]float64{}))
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	if err := s.cmd.stop(ctx); !errors.Is(err, context.Canceled) {
+	if _, err := s.cmd.getForwardKin(ctx, [6]float64{}); !errors.Is(err, context.Canceled) {
 		t.Errorf("got %v, want context.Canceled", err)
 	}
 	if sent := fc.sent(); len(sent) != 0 {
 		t.Errorf("sent %v on a cancelled context", sent)
+	}
+}
+
+// STOP is the exception: it is most often sent for a context that is ending.
+func TestStopSentOnCancelledContext(t *testing.T) {
+	fc := newFakeController(t)
+	s, _ := newControllerTestArm(t, fc, restingFrame([6]float64{}))
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := s.Stop(ctx, nil); err != nil {
+		t.Fatal(err)
+	}
+	if fc.count("STOP") != 1 {
+		t.Errorf("STOP not sent on a cancelled context: %v", fc.sent())
+	}
+}
+
+// A connection that died unnoticed must not swallow a STOP: the failed write
+// drops it, and STOP goes out again on a fresh one.
+func TestStopRetriesOnADeadConnection(t *testing.T) {
+	fc := newFakeController(t)
+	fc.setReply(fakeFKReply)
+	s, _ := newControllerTestArm(t, fc, restingFrame([6]float64{}))
+	if _, err := s.cmd.getForwardKin(context.Background(), [6]float64{}); err != nil {
+		t.Fatal(err)
+	}
+	s.cmd.connMu.Lock()
+	_ = s.cmd.conn.Close() // dead, but still the client's connection
+	s.cmd.connMu.Unlock()
+	if err := s.cmd.stop(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if fc.count("STOP") != 1 {
+		t.Errorf("STOP not delivered: %v", fc.sent())
+	}
+}
+
+// A STOP must not wait behind other commands queued for the shared connection,
+// only behind the one already on the wire.
+func TestStopJumpsTheCommandQueue(t *testing.T) {
+	fc := newFakeController(t)
+	fc.setReply(func(cmdID int, _ string) string {
+		switch cmdID {
+		case cmdIDGetForwardKin:
+			time.Sleep(300 * time.Millisecond)
+			return "100,200,300,0,0,0"
+		case cmdIDGetRobotErrorCode:
+			return "0,0"
+		}
+		return "1"
+	})
+	s, _ := newControllerTestArm(t, fc, restingFrame([6]float64{}))
+	ctx := context.Background()
+
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() { defer wg.Done(); _, _ = s.cmd.getForwardKin(ctx, [6]float64{}) }()
+	waitFor(t, "the slow command to be on the wire", func() bool { return fc.count("GetForwardKin") == 1 })
+	go func() { defer wg.Done(); _, _, _ = s.cmd.getRobotErrorCode(ctx) }()
+	time.Sleep(50 * time.Millisecond) // let it queue
+	if err := s.cmd.stop(ctx); err != nil {
+		t.Fatal(err)
+	}
+	wg.Wait()
+	want := []string{"GetForwardKin", "STOP", "GetRobotErrorCode"}
+	if got := fc.sent(); fmt.Sprint(got) != fmt.Sprint(want) {
+		t.Errorf("got order %v, want %v", got, want)
+	}
+}
+
+// A blended sequence that fails (not just one that's cancelled) must stop the
+// waypoints it already queued on the controller.
+func TestFailedBlendedSequenceStops(t *testing.T) {
+	fc := newFakeController(t)
+	moveJs := 0
+	fc.setReply(func(cmdID int, data string) string {
+		switch cmdID {
+		case cmdIDGetForwardKin:
+			return "100,200,300,0,0,0"
+		case cmdIDMoveJ:
+			moveJs++
+			if moveJs == 2 {
+				return "154"
+			}
+		}
+		return "1"
+	})
+	s, _ := newControllerTestArm(t, fc, restingFrame([6]float64{}))
+	s.cfg = &Config{BlendTimeMs: 100}
+	err := s.MoveThroughJointPositions(context.Background(), [][]referenceframe.Input{testTarget(), testTarget(), testTarget()}, nil, nil)
+	if err == nil || !strings.Contains(err.Error(), "waypoint 2/3") {
+		t.Fatalf("got %v, want waypoint 2's MoveJ error", err)
+	}
+	if fc.count("STOP") != 1 {
+		t.Errorf("queued blended waypoints not stopped: %v", fc.sent())
+	}
+}
+
+// NaN compares false against both joint limits, so it needs its own check.
+func TestNonFiniteJointTargetsRejected(t *testing.T) {
+	for _, v := range []float64{math.NaN(), math.Inf(1)} {
+		fc := newFakeController(t)
+		s, _ := newControllerTestArm(t, fc, restingFrame([6]float64{}))
+		target := testTarget()
+		target[2] = v
+		if err := s.MoveToJointPositions(context.Background(), target, nil); err == nil {
+			t.Errorf("%v: expected an error", v)
+		}
+		if sent := fc.sent(); len(sent) != 0 {
+			t.Errorf("%v: sent %v", v, sent)
+		}
+	}
+}
+
+// With no status feed there's no seeing a fault or the move finishing, so the
+// move is abandoned and the arm stopped.
+func TestMoveStopsWhenStatusFeedIsLost(t *testing.T) {
+	fc := newFakeController(t)
+	fc.setReply(fakeFKReply)
+	s, sc := newControllerTestArm(t, fc, movingFrame())
+	errCh := make(chan error, 1)
+	go func() { errCh <- s.MoveToJointPositions(context.Background(), testTarget(), nil) }()
+	waitFor(t, "MoveJ", func() bool { return fc.count("MoveJ") == 1 })
+	sc.recordError(errors.New("status read: connection reset"))
+	select {
+	case err := <-errCh:
+		if err == nil || !strings.Contains(err.Error(), "status feed lost") {
+			t.Errorf("got %v, want a lost-feed error", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("move kept waiting with no status feed")
+	}
+	if fc.count("STOP") != 1 {
+		t.Errorf("arm not stopped: %v", fc.sent())
+	}
+}
+
+// Close must release the shared connections once, however often it's called:
+// the references it drops are shared with the gripper.
+func TestCloseIsIdempotent(t *testing.T) {
+	fc := newFakeController(t)
+	s, _ := newControllerTestArm(t, fc, restingFrame([6]float64{}))
+	// TEST-NET-3: the shared client connects lazily, and never does here.
+	s.host = "203.0.113.3"
+	acquireCommandClient(s.host, commandPort, s.logger) // the arm's
+	acquireCommandClient(s.host, commandPort, s.logger) // a gripper's
+	t.Cleanup(func() { releaseCommandClient(s.host, commandPort) })
+
+	for range 2 {
+		if err := s.Close(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	sharedCommandMu.Lock()
+	e, ok := sharedCommandClients[net.JoinHostPort(s.host, strconv.Itoa(commandPort))]
+	sharedCommandMu.Unlock()
+	if !ok || e.refs != 1 {
+		t.Errorf("after two Closes the gripper's reference is gone (entry present %v)", ok)
 	}
 }
 
@@ -234,5 +399,24 @@ func TestMoveRefusedWhileFaultedOrEStopped(t *testing.T) {
 				t.Errorf("MoveJ sent to a controller that can't move: %v", fc.sent())
 			}
 		})
+	}
+}
+
+// A feed that stays connected but stops delivering frames (say, every frame
+// fails to parse) is no feed either.
+func TestMoveStopsWhenStatusFeedFreezes(t *testing.T) {
+	fc := newFakeController(t)
+	fc.setReply(fakeFKReply)
+	s, _ := newControllerTestArm(t, fc, movingFrame()) // never refreshed
+	start := time.Now()
+	err := s.MoveToJointPositions(context.Background(), testTarget(), nil)
+	if err == nil || !strings.Contains(err.Error(), "status feed lost") {
+		t.Errorf("got %v, want a lost-feed error", err)
+	}
+	if elapsed := time.Since(start); elapsed > 3*statusFeedLostTimeout {
+		t.Errorf("took %v to notice", elapsed)
+	}
+	if fc.count("STOP") != 1 {
+		t.Errorf("arm not stopped: %v", fc.sent())
 	}
 }

@@ -49,10 +49,17 @@ import (
 const (
 	cmdDialTimeout  = 5 * time.Second
 	cmdWriteTimeout = 5 * time.Second
-	// cmdReadTimeout bounds the ack wait when the caller's context carries no
-	// deadline. It only covers the command being queued, not the physical
-	// motion — completion is tracked separately by polling the status port.
+	// cmdReadTimeout caps every ack wait, whatever the caller's deadline. It
+	// only covers the command being queued, not the physical motion —
+	// completion is tracked separately by polling the status port, and every
+	// command this module sends is acknowledged once queued (MoveGripper is sent
+	// non-blocking for exactly this reason). Capping it bounds how long one
+	// command can hold the connection, and so how long a STOP can wait for it.
 	cmdReadTimeout = 10 * time.Second
+
+	// stopTimeout bounds a STOP, which runs on a deadline of its own: the
+	// caller's context is often the very one being cancelled.
+	stopTimeout = 5 * time.Second
 
 	// cmdMaxFrameLen caps how much we'll buffer in readFrame while scanning
 	// for a "/b/f" terminator that never arrives (corrupt stream, wrong
@@ -69,7 +76,7 @@ type commandClient struct {
 	port   int
 	logger logging.Logger
 
-	mu sync.Mutex // serializes one in-flight request
+	lock cmdLock // serializes one in-flight request
 
 	connMu sync.RWMutex
 	conn   net.Conn
@@ -80,6 +87,70 @@ type commandClient struct {
 
 func newCommandClient(host string, port int, logger logging.Logger) *commandClient {
 	return &commandClient{host: host, port: port, logger: logger}
+}
+
+// cmdLock serializes requests on the command connection. Unlike a sync.Mutex,
+// a waiter gives up when its context ends, and an urgent waiter (STOP) goes
+// ahead of every normal one, so a STOP waits at most for the one command
+// already on the wire — never behind a queue of ServoJ setpoints or gripper
+// traffic from the other resources sharing the connection.
+type cmdLock struct {
+	mu      sync.Mutex
+	held    bool
+	urgent  int           // urgent waiters, which normal waiters yield to
+	changed chan struct{} // closed (and replaced) whenever held or urgent changes
+}
+
+// changedLocked returns the channel the next change closes. Caller holds l.mu.
+func (l *cmdLock) changedLocked() chan struct{} {
+	if l.changed == nil {
+		l.changed = make(chan struct{})
+	}
+	return l.changed
+}
+
+// broadcastLocked wakes every waiter. Caller holds l.mu.
+func (l *cmdLock) broadcastLocked() {
+	if l.changed != nil {
+		close(l.changed)
+		l.changed = nil
+	}
+}
+
+func (l *cmdLock) acquire(ctx context.Context, urgent bool) error {
+	l.mu.Lock()
+	if urgent {
+		l.urgent++
+	}
+	for l.held || (!urgent && l.urgent > 0) {
+		ch := l.changedLocked()
+		l.mu.Unlock()
+		select {
+		case <-ch:
+			l.mu.Lock()
+		case <-ctx.Done():
+			l.mu.Lock()
+			if urgent {
+				l.urgent--
+				l.broadcastLocked()
+			}
+			l.mu.Unlock()
+			return ctx.Err()
+		}
+	}
+	l.held = true
+	if urgent {
+		l.urgent--
+	}
+	l.mu.Unlock()
+	return nil
+}
+
+func (l *cmdLock) release() {
+	l.mu.Lock()
+	l.held = false
+	l.broadcastLocked()
+	l.mu.Unlock()
 }
 
 // ---------------------------------------------------------------------------
@@ -186,8 +257,24 @@ func (c *commandClient) close() error {
 // callers build that string (see moveJ/stop below), send just handles
 // framing, the connection, and response correlation.
 func (c *commandClient) send(ctx context.Context, cmdID int, data string) (string, error) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
+	return c.do(ctx, cmdID, data, false)
+}
+
+// sendAck sends a command whose only reply is the errcode ack.
+func (c *commandClient) sendAck(ctx context.Context, cmdID int, data string) error {
+	resp, err := c.send(ctx, cmdID, data)
+	if err != nil {
+		return err
+	}
+	return parseErrcode(resp)
+}
+
+// do is send, with urgent selecting cmdLock's priority lane (see stop).
+func (c *commandClient) do(ctx context.Context, cmdID int, data string, urgent bool) (string, error) {
+	if err := c.lock.acquire(ctx, urgent); err != nil {
+		return "", fmt.Errorf("command %q not sent: %w", data, err)
+	}
+	defer c.lock.release()
 
 	// A cancelled caller (e.g. a move that Stop just superseded) must not get
 	// one more command out, which the controller would then execute.
@@ -214,12 +301,13 @@ func (c *commandClient) send(ctx context.Context, cmdID int, data string) (strin
 	sendStart := time.Now()
 	c.logger.Debugw("command port: sending frame", "cnt", reqCnt, "cmd_id", cmdID, "data", data, "frame", frame)
 
-	// No deadline on ctx typically means the caller means to bound the whole
-	// operation (queue + physical motion), not just this ack — same
-	// fallback dobot's dashClient uses for its comparable read.
-	deadline, ok := ctx.Deadline()
-	if !ok {
-		deadline = time.Now().Add(cmdReadTimeout)
+	// The ack comes as soon as the command is queued, so it gets
+	// cmdReadTimeout at most, or less if the caller's deadline is sooner. A
+	// longer wait would hold the connection (and any STOP behind it) hostage
+	// to a controller that has stopped answering.
+	deadline := time.Now().Add(cmdReadTimeout)
+	if d, ok := ctx.Deadline(); ok && d.Before(deadline) {
+		deadline = d
 	}
 	_ = conn.SetWriteDeadline(time.Now().Add(cmdWriteTimeout))
 	_ = conn.SetReadDeadline(deadline)
@@ -552,9 +640,21 @@ func parsePose6(data string) ([6]float64, error) {
 }
 
 // stop sends STOP (manual §2.35, CMD_ID 102), which halts in-flight motion.
+// It jumps the queue of commands waiting for the connection, and it is sent
+// even when ctx is already cancelled — a stop is typically issued on behalf
+// of a context that is ending — on a stopTimeout deadline of its own. If the
+// connection turns out to be dead (a failed write drops it), it is sent once
+// more on a fresh one: a duplicate STOP is harmless, a lost one isn't.
 func (c *commandClient) stop(ctx context.Context) error {
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), stopTimeout)
+	defer cancel()
 	c.logger.Debugw("stop: sending STOP")
-	resp, err := c.send(ctx, cmdIDStop, "STOP")
+	resp, err := c.do(ctx, cmdIDStop, "STOP", true)
+	var ce *ControllerError
+	if err != nil && ctx.Err() == nil && !errors.As(err, &ce) {
+		c.logger.Warnw("STOP failed; retrying on a new connection", "err", err)
+		resp, err = c.do(ctx, cmdIDStop, "STOP", true)
+	}
 	if err != nil {
 		c.logger.Debugw("stop: send failed", "err", err)
 		return err
@@ -581,11 +681,7 @@ func (c *commandClient) stop(ctx context.Context) error {
 // still has to be done once on the controller (WebApp/teach pendant).
 func (c *commandClient) setGripperConfig(ctx context.Context, company, device, softwareVersion, bus int) error {
 	data := fmt.Sprintf("SetGripperConfig(%d,%d,%d,%d)", company, device, softwareVersion, bus)
-	resp, err := c.send(ctx, cmdIDSetGripperConfig, data)
-	if err != nil {
-		return err
-	}
-	return parseErrcode(resp)
+	return c.sendAck(ctx, cmdIDSetGripperConfig, data)
 }
 
 // gripperConfig is GetGripperConfig()'s return value (§7.1.2, Table 7-1-2).
@@ -630,11 +726,7 @@ func (c *commandClient) getGripperConfig(ctx context.Context) (gripperConfig, er
 // callers must wait for it before issuing a move (see gripper.go's activate).
 func (c *commandClient) actGripper(ctx context.Context, index, action int) error {
 	data := fmt.Sprintf("ActGripper(%d,%d)", index, action)
-	resp, err := c.send(ctx, cmdIDActGripper, data)
-	if err != nil {
-		return err
-	}
-	return parseErrcode(resp)
+	return c.sendAck(ctx, cmdIDActGripper, data)
 }
 
 // dragTeachSwitch sends DragTeachSwitch(0|1) (CMD_ID 333 — see
@@ -644,16 +736,7 @@ func (c *commandClient) actGripper(ctx context.Context, index, action int) error
 // status port instead of a dedicated query command — see
 // constants.go's robotModeDrag/programStateDrag and module.go's DoCommand.
 func (c *commandClient) dragTeachSwitch(ctx context.Context, on bool) error {
-	state := 0
-	if on {
-		state = 1
-	}
-	data := fmt.Sprintf("DragTeachSwitch(%d)", state)
-	resp, err := c.send(ctx, cmdIDDragTeachSwitch, data)
-	if err != nil {
-		return err
-	}
-	return parseErrcode(resp)
+	return c.sendAck(ctx, cmdIDDragTeachSwitch, fmt.Sprintf("DragTeachSwitch(%d)", boolInt(on)))
 }
 
 // moveGripperParams mirrors manual Table 7-1-4 in field order.
@@ -678,14 +761,12 @@ func formatMoveGripper(p moveGripperParams) string {
 }
 
 // moveGripper sends MoveGripper() (§7.1.4, CMD_ID 228). With Block=0 the
-// controller does not acknowledge until the fingers have stopped, so the
-// caller's context deadline must cover the motion, not just the queueing.
+// controller does not acknowledge until the fingers have stopped, holding the
+// shared connection (and any STOP behind it) for the whole motion, so this
+// module only ever sends Block=1 and follows the motion on the status feed
+// (see gripper.go's waitForGripperMove).
 func (c *commandClient) moveGripper(ctx context.Context, p moveGripperParams) error {
-	resp, err := c.send(ctx, cmdIDMoveGripper, formatMoveGripper(p))
-	if err != nil {
-		return err
-	}
-	return parseErrcode(resp)
+	return c.sendAck(ctx, cmdIDMoveGripper, formatMoveGripper(p))
 }
 
 // getRobotErrorCode sends GetRobotErrorCode() (§6.3.16, CMD_ID 1163) and
@@ -722,4 +803,12 @@ func parseIntList(data string) ([]int, error) {
 		out = append(out, v)
 	}
 	return out, nil
+}
+
+// boolInt is the protocol's 0/1 for a boolean argument.
+func boolInt(b bool) int {
+	if b {
+		return 1
+	}
+	return 0
 }

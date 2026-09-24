@@ -20,6 +20,7 @@ package viamfairino
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync"
 	"time"
@@ -123,15 +124,15 @@ const gripperIndex = 1
 // treat it as a signal to re-activate and retry.
 const errcodeGripperMove = 73
 
-// moveAckMargin is the slack added to MaxTimeMs when bounding a blocking
-// MoveGripper, covering the controller's own overhead past the move's timeout.
+// moveAckMargin is the slack added to MaxTimeMs when bounding a MoveGripper,
+// covering the controller's own overhead past the move's timeout.
 const moveAckMargin = 5 * time.Second
 
-// gripperSettleTimeout bounds how long Grab waits for the status feed (8083) to
-// publish a post-move frame before reading hold state. The blocking MoveGripper
-// ack (8080) can beat the status feed by a frame or two, so a hold check run the
-// instant the move returns can read a stale, pre-clamp gripper_motion_done.
-const gripperSettleTimeout = 2 * time.Second
+// gripperStartGrace is how long a move may go without the status feed showing
+// the fingers moving before it counts as already finished: a gripper already
+// at the target, or closing on a part it already touches, never reports
+// moving at all.
+const gripperStartGrace = time.Second
 
 type fairinoGripper struct {
 	resource.AlwaysRebuild
@@ -154,6 +155,8 @@ type fairinoGripper struct {
 	activateWait time.Duration
 
 	actMu sync.Mutex // serializes (re)activation
+
+	closeOnce sync.Once
 }
 
 func newFairinoGripper(ctx context.Context, deps resource.Dependencies, rawConf resource.Config, logger logging.Logger) (gripper.Gripper, error) {
@@ -253,9 +256,9 @@ func (g *fairinoGripper) activate(ctx context.Context, reset bool) error {
 	return nil
 }
 
-// moveGripper issues a blocking MoveGripper to pos (0-100), so the call returns
-// only once the fingers have reached position (or maxTime elapses) — Open/Grab
-// depend on that, and Grab's hold check must run after the motion completes.
+// moveGripper moves the fingers to pos (0-100) and returns only once they have
+// stopped (or maxTime elapses) — Open/Grab depend on that, and Grab's hold
+// check must run after the motion completes.
 //
 // If the controller reports errcode 73 ("gripper movement error"), the gripper
 // is not activated/ready; we reset+re-activate it once and retry, since this
@@ -278,28 +281,67 @@ func (g *fairinoGripper) moveGripper(ctx context.Context, pos int) error {
 	return err
 }
 
-// moveGripperOnce issues a single blocking MoveGripper to pos (0-100). block=0
-// is blocking (per the vendor SDK: 0-blocking, 1-non-blocking); type=0 / rot*
-// are the parallel two-finger (non-rotary) values; rotNum is a double.
+// moveGripperOnce sends one MoveGripper to pos (0-100) and waits for the
+// fingers to stop. It is sent non-blocking (block=1; the vendor SDK's 0 is
+// blocking): a blocking MoveGripper isn't acknowledged until the fingers stop,
+// and for all that time it would hold the command connection this gripper
+// shares with the arm, queueing the arm's STOP behind it. Completion is read
+// from the status feed instead (waitForGripperMove). type=0 / rot* are the
+// parallel two-finger (non-rotary) values; rotNum is a double.
 func (g *fairinoGripper) moveGripperOnce(ctx context.Context, pos int) error {
-	// A blocking move isn't acknowledged until the fingers stop, which can take
-	// up to MaxTimeMs — longer than the command client's default 10s ack
-	// timeout. Give the call a deadline that covers the motion when the caller
-	// hasn't set one, or the read times out mid-move and drops the connection.
-	if _, ok := ctx.Deadline(); !ok {
-		var cancel context.CancelFunc
-		ctx, cancel = context.WithTimeout(ctx, time.Duration(g.maxTime)*time.Millisecond+moveAckMargin)
-		defer cancel()
-	}
-	return g.cmd.moveGripper(ctx, moveGripperParams{
+	sentAt := time.Now()
+	if err := g.cmd.moveGripper(ctx, moveGripperParams{
 		Index:   gripperIndex,
 		Pos:     pos,
 		Vel:     g.speed,
 		Force:   g.force,
 		MaxTime: g.maxTime,
-		Block:   0, // blocking: the ack means the fingers have stopped
+		Block:   1, // non-blocking: see above
 		Type:    0, // parallel two-finger, not rotary
-	})
+	}); err != nil {
+		return err
+	}
+	return g.waitForGripperMove(ctx, sentAt)
+}
+
+// waitForGripperMove follows a move sent at sentAt on the status feed: it
+// waits for a frame captured after the send that shows the fingers moving
+// (or for gripperStartGrace to pass without one), then for one that shows them
+// stopped, so a hold check run next reflects this move rather than a stale
+// pre-move frame. It fails if the move outlasts max_time plus a margin, or if
+// the status feed goes quiet.
+func (g *fairinoGripper) waitForGripperMove(ctx context.Context, sentAt time.Time) error {
+	deadline := sentAt.Add(time.Duration(g.maxTime)*time.Millisecond + moveAckMargin)
+	started := false
+	for {
+		fr, ok, err := g.status.latest()
+		// No fresh frame for statusFeedLostTimeout: the feed is down, or
+		// frozen, and there is no telling when the fingers stop.
+		if time.Since(sentAt) > statusFeedLostTimeout && (!ok || time.Since(fr.ReceivedAt) > statusFeedLostTimeout) {
+			if err == nil {
+				err = errors.New("no new frames")
+			}
+			return fmt.Errorf("status feed lost while the gripper was moving: %w", err)
+		}
+		switch {
+		case !ok:
+		case !fr.GripperValid:
+			return fmt.Errorf("status frame is %d bytes, too short to contain the gripper fields (need %d)",
+				len(fr.RawPayload), minGripperPayloadLen)
+		case fr.ReceivedAt.After(sentAt):
+			if fr.GripperMotionDone == gripperMotionMoving {
+				started = true
+			} else if started || time.Since(sentAt) >= gripperStartGrace {
+				return nil
+			}
+		}
+		if time.Now().After(deadline) {
+			return fmt.Errorf("gripper move did not finish within %v", deadline.Sub(sentAt))
+		}
+		if !sleepCtx(ctx, motionPollInterval) {
+			return ctx.Err()
+		}
+	}
 }
 
 func (g *fairinoGripper) Open(ctx context.Context, extra map[string]any) error {
@@ -311,36 +353,16 @@ func (g *fairinoGripper) Open(ctx context.Context, extra map[string]any) error {
 func (g *fairinoGripper) Grab(ctx context.Context, extra map[string]any) (bool, error) {
 	ctx, done := g.opMgr.New(ctx)
 	defer done()
+	// moveGripper returns on a post-move frame, so this reads the clamp result,
+	// not the state from before the move.
 	if err := g.moveGripper(ctx, g.grabPos); err != nil {
 		return false, err
 	}
-	// The 8080 move ack can arrive a frame or two before the 8083 status feed
-	// reflects the clamp, so wait for a fresh, settled frame before reading hold
-	// state — otherwise a real grab reads stale (pre-clamp) and reports false.
-	g.waitForGripperSettled(ctx, time.Now())
 	status, err := g.IsHoldingSomething(ctx, extra)
 	if err != nil {
 		return false, err
 	}
 	return status.IsHoldingSomething, nil
-}
-
-// waitForGripperSettled polls the status feed until it publishes a frame
-// captured after `after` whose gripper motion has stopped (not "moving"), so a
-// hold check run next reflects the move just issued rather than a stale
-// pre-move frame. Returns once settled or after gripperSettleTimeout; callers
-// read the resulting state via the status feed as usual.
-func (g *fairinoGripper) waitForGripperSettled(ctx context.Context, after time.Time) {
-	deadline := time.Now().Add(gripperSettleTimeout)
-	for time.Now().Before(deadline) && ctx.Err() == nil {
-		fr, ok, _ := g.status.latest()
-		if ok && fr.GripperValid && fr.ReceivedAt.After(after) && fr.GripperMotionDone != gripperMotionMoving {
-			return
-		}
-		if !sleepCtx(ctx, 20*time.Millisecond) {
-			return
-		}
-	}
 }
 
 // IsHoldingSomething reports whether the gripper is holding an object, from the
@@ -390,7 +412,7 @@ func (g *fairinoGripper) gripperFrame(ctx context.Context) (statusFrame, error) 
 }
 
 // IsMoving reflects whether this component has a gripper operation in flight.
-// Open/Grab issue blocking MoveGripper calls, so this is true only while one is
+// Open/Grab wait for their move to finish, so this is true only while one is
 // running (hardware has no reliable "is moving" query — see IsHoldingSomething).
 func (g *fairinoGripper) IsMoving(ctx context.Context) (bool, error) {
 	return g.opMgr.OpRunning(), nil
@@ -477,10 +499,13 @@ func (g *fairinoGripper) Status(ctx context.Context) (map[string]any, error) {
 // Close releases this resource's share of the status reader (stopping it if the
 // arm isn't using it too) and drops the command connection. Unlike the previous
 // XML-RPC transport — stateless HTTP with nothing to tear down — both of these
-// own real resources.
+// own real resources. Only the first call releases them: the references are
+// shared with the other resources on this controller.
 func (g *fairinoGripper) Close(ctx context.Context) error {
-	releaseStatusClient(g.host, statusPort)
-	releaseCommandClient(g.host, commandPort)
+	g.closeOnce.Do(func() {
+		releaseStatusClient(g.host, statusPort)
+		releaseCommandClient(g.host, commandPort)
+	})
 	return nil
 }
 

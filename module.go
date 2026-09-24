@@ -31,6 +31,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"strings"
@@ -197,6 +198,8 @@ type viamFairinoFairino struct {
 
 	cancelCtx  context.Context
 	cancelFunc func()
+
+	closeOnce sync.Once
 }
 
 func newViamFairinoFairino(ctx context.Context, deps resource.Dependencies, rawConf resource.Config, logger logging.Logger) (arm.Arm, error) {
@@ -491,7 +494,48 @@ const (
 	// jointToleranceDeg is the per-joint slop accepted when confirming a
 	// completed move actually reached its target, degrees.
 	jointToleranceDeg = 0.5
+
+	// statusFeedLostTimeout is how long a move keeps going without a status
+	// frame before it is abandoned (and the arm stopped): with no feed there
+	// is no way to see a fault, an e-stop or the move finishing.
+	statusFeedLostTimeout = time.Second
+
+	// motionTimeoutMargin is the fixed part of motionTimeout, covering
+	// acceleration, settling and the controller's own queueing.
+	motionTimeoutMargin = 10 * time.Second
+
+	// maxJointSpeedDegsPerSec is the joint speed that MoveJ's speed=100%
+	// corresponds to. The FR5 datasheet gives 180°/s on every joint. The
+	// FR5-WML's isn't published, so it is assumed to be the same.
+	maxJointSpeedDegsPerSec = 180.0
 )
+
+// motionTimeout bounds how long a move that covers travelDeg of joint travel
+// (the largest single joint's) at speedPct may take before it is treated as
+// stuck: twice the time at the commanded speed, plus motionTimeoutMargin.
+func motionTimeout(travelDeg, speedPct float64) time.Duration {
+	secs := travelDeg / (speedPct / 100 * maxJointSpeedDegsPerSec)
+	return time.Duration(2*secs*float64(time.Second)) + motionTimeoutMargin
+}
+
+// maxJointTravelDeg is the largest per-joint distance between a and b.
+func maxJointTravelDeg(a, b [6]float64) float64 {
+	travel := 0.0
+	for i := range a {
+		travel = math.Max(travel, math.Abs(a[i]-b[i]))
+	}
+	return travel
+}
+
+// inputsToDeg converts a 6-joint target from radians to the controller's
+// degrees. Callers have checked the joint count (checkJointTargets).
+func inputsToDeg(positions []referenceframe.Input) [6]float64 {
+	var deg [6]float64
+	for i := range deg {
+		deg[i] = rdkutils.RadToDeg(positions[i])
+	}
+	return deg
+}
 
 // MoveToJointPositions moves the arm's joints to the given positions via a
 // single blocking MoveJ() (manual §2.1). See moveToJointPositionsOnce for
@@ -506,7 +550,17 @@ func (s *viamFairinoFairino) MoveToJointPositions(ctx context.Context, positions
 	if err := s.checkJointTargets(ctx, [][]referenceframe.Input{positions}); err != nil {
 		return err
 	}
-	return s.moveToJointPositionsOnce(ctx, positions, blendTBlocking)
+	fr, err := s.latestFrame(ctx)
+	if err != nil {
+		return err
+	}
+	sent, err := s.moveToJointPositionsOnce(ctx, positions, blendTBlocking, maxJointTravelDeg(fr.JointDegs, inputsToDeg(positions)))
+	if err != nil && sent {
+		// Cancelled or failed after the MoveJ reached the controller, which
+		// would otherwise carry on with it.
+		s.stopDetached()
+	}
+	return err
 }
 
 // checkReadyToMove refuses to start a move while the controller is e-stopped
@@ -536,14 +590,22 @@ func (s *viamFairinoFairino) checkReadyToMove(ctx context.Context) error {
 
 // checkJointTargets rejects, before anything is sent to the controller, any
 // target with the wrong number of joints (which would otherwise index past the
-// end of the slice) or outside the kinematic model's joint limits. A joint
-// already outside its limits may still move back toward them — that is
-// arm.CheckDesiredJointPositions's rule, the same check viam-ufactory-xarm runs.
+// end of the slice), a NaN or infinite position, or one outside the kinematic
+// model's joint limits. A joint already outside its limits may still move back
+// toward them — that is arm.CheckDesiredJointPositions's rule, the same check
+// viam-ufactory-xarm runs. NaN has to be caught here: it compares false against
+// both limits, so CheckDesiredJointPositions lets it through, and it would
+// reach the controller as the literal text "NaN".
 func (s *viamFairinoFairino) checkJointTargets(ctx context.Context, targets [][]referenceframe.Input) error {
 	dof := len(s.model.DoF())
 	for i, target := range targets {
 		if len(target) != dof {
 			return fmt.Errorf("waypoint %d/%d has %d joint positions, the arm has %d joints", i+1, len(targets), len(target), dof)
+		}
+		for j, v := range target {
+			if math.IsNaN(v) || math.IsInf(v, 0) {
+				return fmt.Errorf("waypoint %d/%d: joint %d position is %v", i+1, len(targets), j, v)
+			}
 		}
 		if err := arm.CheckDesiredJointPositions(ctx, s, target); err != nil {
 			return fmt.Errorf("waypoint %d/%d: %w", i+1, len(targets), err)
@@ -556,42 +618,35 @@ func (s *viamFairinoFairino) checkJointTargets(ctx context.Context, targets [][]
 // this waypoint before any next queued motion.
 const blendTBlocking = -1
 
-// moveToJointPositionsOnce sends a single blocking MoveJ() (manual §2.1) and
-// waits for completion. It returns once the controller reports the move
-// complete (statusFrame.MotionDone) and the joints are within tolerance of
-// the target, or once ctx is cancelled — in which case it sends STOP before
-// returning ctx.Err(), mirroring viam-dobot's cancellation handling.
+// moveToJointPositionsOnce sends a single MoveJ() (manual §2.1) and, for a
+// blocking one, waits for completion: until the controller reports the move
+// complete (statusFrame.MotionDone) with the joints within tolerance of the
+// target, or ctx is cancelled, or the move outlasts motionTimeout for
+// travelDeg — the largest joint travel still to cover, queued blends included.
 //
-// Shared by MoveToJointPositions (always blendTBlocking) and
-// MoveThroughJointPositions (chooses blendT per waypoint). Deliberately does
-// NOT call s.opMgr.New itself: operation.SingleOperationManager cancels the
-// previous operation the moment a new one starts, so if this were called
-// per-waypoint from inside a loop that's already under one opMgr operation,
-// each waypoint would immediately cancel the one before it. The public entry
-// points (MoveToJointPositions, MoveToPosition) own the single opMgr.New call
-// for the whole move; this is the shared mechanics underneath.
+// sent reports whether a MoveJ was handed to the controller (even if its ack
+// then failed), in which case the arm may be moving. This never sends STOP
+// itself: stopping is the job of the caller, which owns the operation
+// (MoveToJointPositions, MoveThroughJointPositions) and knows whether earlier
+// blended waypoints are still queued too.
 //
-// blendTBlocking waits for physical completion (statusFrame.MotionDone, joints
-// within tolerance), sending STOP and returning ctx.Err() on cancellation. Any
-// positive blendT (a blend — see Config.BlendTimeMs) returns as soon as the
-// command is acked; the caller must send the next waypoint immediately so the
-// controller's own motion queue blends between them. blendT == 0 is rejected: a
-// 0ms blend is indistinguishable from a full stop, so it's never a meaningful
-// value to send.
-func (s *viamFairinoFairino) moveToJointPositionsOnce(ctx context.Context, positions []referenceframe.Input, blendT float64) error {
+// blendTBlocking waits for physical completion. Any positive blendT (a blend —
+// see Config.BlendTimeMs) returns as soon as the command is acked; the caller
+// must send the next waypoint immediately so the controller's own motion
+// queue blends between them. blendT == 0 is rejected: a 0ms blend is
+// indistinguishable from a full stop, so it's never a meaningful value to
+// send.
+func (s *viamFairinoFairino) moveToJointPositionsOnce(ctx context.Context, positions []referenceframe.Input, blendT, travelDeg float64) (sent bool, err error) {
 	if blendT == 0 {
-		return errors.New("moveToJointPositionsOnce: blendT must not be 0 (0ms blend is no different from a full stop)")
+		return false, errors.New("moveToJointPositionsOnce: blendT must not be 0 (0ms blend is no different from a full stop)")
 	}
 	if len(positions) != 6 {
-		return fmt.Errorf("moveToJointPositionsOnce: expected 6 joint positions, got %d", len(positions))
+		return false, fmt.Errorf("moveToJointPositionsOnce: expected 6 joint positions, got %d", len(positions))
 	}
 	moveStart := time.Now()
 	s.logger.Debugw("moveToJointPositionsOnce: called", "positions_rad", positions)
 
-	var targetDeg [6]float64
-	for i := 0; i < 6; i++ {
-		targetDeg[i] = rdkutils.RadToDeg(positions[i])
-	}
+	targetDeg := inputsToDeg(positions)
 	s.logger.Debugw("moveToJointPositionsOnce: target", "target_deg", targetDeg)
 
 	// desc_pos: see moveJParams.Pose's doc comment in command.go — the
@@ -605,16 +660,17 @@ func (s *viamFairinoFairino) moveToJointPositionsOnce(ctx context.Context, posit
 	targetPose, err := s.cmd.getForwardKin(ctx, targetDeg)
 	if err != nil {
 		s.logger.Debugw("moveToJointPositionsOnce: GetForwardKin failed", "err", err)
-		return fmt.Errorf("GetForwardKin: %w", err)
+		return false, fmt.Errorf("GetForwardKin: %w", err)
 	}
 	s.logger.Debugw("moveToJointPositionsOnce: forward kinematics for target", "target_deg", targetDeg, "target_pose", targetPose)
 
+	speedPct := float64(orDefaultInt(s.cfg.JointSpeedPercent, defaultJointSpeedPercent))
 	params := moveJParams{
 		Joints:       targetDeg,
 		Pose:         targetPose,
 		ToolNum:      s.cfg.ToolNum,
 		WorkPieceNum: s.cfg.WorkpieceNum,
-		SpeedPercent: float64(orDefaultInt(s.cfg.JointSpeedPercent, defaultJointSpeedPercent)),
+		SpeedPercent: speedPct,
 		AccelPercent: 0, // reserved/non-functional on the controller — see moveJParams.AccelPercent
 		OverridePct:  100,
 		BlendT:       blendT,
@@ -622,7 +678,9 @@ func (s *viamFairinoFairino) moveToJointPositionsOnce(ctx context.Context, posit
 
 	if err := s.cmd.moveJ(ctx, params); err != nil {
 		s.logger.Debugw("moveToJointPositionsOnce: MoveJ ack failed", "elapsed", time.Since(moveStart), "err", err)
-		return fmt.Errorf("MoveJ: %w", err)
+		// The frame may have reached the controller even though its ack didn't
+		// come back, so this counts as sent.
+		return true, fmt.Errorf("MoveJ: %w", err)
 	}
 
 	if blendT > 0 {
@@ -630,22 +688,23 @@ func (s *viamFairinoFairino) moveToJointPositionsOnce(ctx context.Context, posit
 		// for. blendT > 0 rather than != blendTBlocking as a precaution: any
 		// non-positive value falls through to waiting.
 		s.logger.Debugw("moveToJointPositionsOnce: MoveJ acknowledged (blend), not waiting for completion", "elapsed", time.Since(moveStart))
-		return nil
+		return true, nil
 	}
 	s.logger.Debugw("moveToJointPositionsOnce: MoveJ acknowledged, waiting for motion to complete", "elapsed", time.Since(moveStart))
 
-	err = s.waitForMotionComplete(ctx, targetDeg)
+	err = s.waitForMotionComplete(ctx, targetDeg, motionTimeout(travelDeg, speedPct))
 	s.logger.Debugw("moveToJointPositionsOnce: done", "elapsed", time.Since(moveStart), "err", err)
-	return err
+	return true, err
 }
 
 // waitForMotionComplete polls the status stream until the controller
 // reports the move done (statusFrame.MotionDone) and the joints are within
-// jointToleranceDeg of targetDeg, or returns an error if the controller
-// e-stops or latches a fault mid-move. On ctx cancellation it issues STOP
-// on a fresh short-lived context before returning ctx.Err(), same shape as
-// viam-dobot's waitForMotionCompleteLocked.
-func (s *viamFairinoFairino) waitForMotionComplete(ctx context.Context, targetDeg [6]float64) error {
+// jointToleranceDeg of targetDeg. It returns an error if the controller
+// e-stops or latches a fault mid-move, if the status feed goes quiet for
+// statusFeedLostTimeout, or if the move takes longer than timeout, and
+// ctx.Err() on cancellation — same shape as viam-dobot's
+// waitForMotionCompleteLocked, minus the STOP, which the caller sends.
+func (s *viamFairinoFairino) waitForMotionComplete(ctx context.Context, targetDeg [6]float64, timeout time.Duration) error {
 	// Per-poll-tick Debug logging of the MotionDone/JointDegs transitions.
 	pollStart := time.Now()
 	s.logger.Debugw("waitForMotionComplete: entering start-grace phase", "grace", motionStartGrace)
@@ -674,20 +733,32 @@ func (s *viamFairinoFairino) waitForMotionComplete(ctx context.Context, targetDe
 	}
 completed:
 
+	deadline := pollStart.Add(timeout)
+	lastFrame := time.Now()
 	for {
 		select {
 		case <-ctx.Done():
-			s.logger.Debugw("waitForMotionComplete: ctx cancelled, sending STOP", "elapsed", time.Since(pollStart), "ctx_err", ctx.Err())
-			s.stopDetached()
+			s.logger.Debugw("waitForMotionComplete: ctx cancelled", "elapsed", time.Since(pollStart), "ctx_err", ctx.Err())
 			return ctx.Err()
 		case <-time.After(motionPollInterval):
 		}
+		if time.Now().After(deadline) {
+			return fmt.Errorf("move did not finish within %v", timeout)
+		}
 
-		fr, ok, _ := s.status.latest()
+		fr, ok, feedErr := s.status.latest()
+		if ok && time.Since(fr.ReceivedAt) > statusFeedLostTimeout {
+			// Connected, but no new frame: as good as no feed.
+			ok, feedErr = false, errors.New("no new status frames")
+		}
 		if !ok {
-			s.logger.Debugw("waitForMotionComplete: completion poll — no status frame yet", "elapsed", time.Since(pollStart))
+			s.logger.Debugw("waitForMotionComplete: completion poll — no status frame", "elapsed", time.Since(pollStart), "err", feedErr)
+			if time.Since(lastFrame) > statusFeedLostTimeout {
+				return fmt.Errorf("status feed lost during motion: %w", feedErr)
+			}
 			continue
 		}
+		lastFrame = time.Now()
 		s.logger.Debugw("waitForMotionComplete: completion poll", "elapsed", time.Since(pollStart),
 			"motion_done", fr.MotionDone, "joint_deg", fr.JointDegs, "target_deg", targetDeg,
 			"error_code", fr.ErrorCode, "e_stop", fr.EmergencyStop)
@@ -708,17 +779,12 @@ completed:
 	}
 }
 
-// stopDetachedTimeout bounds the STOP sent after a move's own context is
-// already done, which is why it can't use that context.
-const stopDetachedTimeout = 2 * time.Second
-
-// stopDetached sends STOP on a fresh short-lived context. Used when a move is
-// cancelled: the caller's ctx is already done, but the controller may still be
-// executing (or have queued, when blending) the motion we sent it.
+// stopDetached sends STOP for a move that is ending early — cancelled, or
+// failed — after sending motion the controller may still be executing (or
+// have queued, when blending). The move's own context may be done by now;
+// commandClient.stop runs on a deadline of its own either way.
 func (s *viamFairinoFairino) stopDetached() {
-	ctx, cancel := context.WithTimeout(context.Background(), stopDetachedTimeout)
-	defer cancel()
-	if err := s.cmd.stop(ctx); err != nil {
+	if err := s.cmd.stop(context.Background()); err != nil {
 		s.logger.Warnw("failed to send STOP after cancelling a move", "err", err)
 	}
 }
@@ -750,12 +816,16 @@ func orDefaultInt(v, def int) int {
 // gone (e.g. on reconfigure). The cancelled move sends STOP on its way out,
 // and CancelRunning waits for that. With no move of ours running, nothing is
 // sent: the command client is shared with the gripper, and a STOP there is
-// only ours to send when we started the motion.
+// only ours to send when we started the motion. Only the first call does
+// anything: the connections are reference-counted and shared with the other
+// resources on this controller, so a second release would take theirs.
 func (s *viamFairinoFairino) Close(ctx context.Context) error {
-	s.opMgr.CancelRunning(ctx)
-	releaseStatusClient(s.host, statusPort)
-	releaseCommandClient(s.host, commandPort)
-	s.cancelFunc()
+	s.closeOnce.Do(func() {
+		s.cancelFunc()
+		s.opMgr.CancelRunning(ctx)
+		releaseStatusClient(s.host, statusPort)
+		releaseCommandClient(s.host, commandPort)
+	})
 	return nil
 }
 
@@ -842,6 +912,13 @@ func (s *viamFairinoFairino) MoveThroughJointPositions(ctx context.Context, posi
 	if err := s.checkJointTargets(ctx, positions); err != nil {
 		return err
 	}
+	fr, err := s.latestFrame(ctx)
+	if err != nil {
+		return err
+	}
+	// travel accumulates the joint travel queued since the last blocking
+	// waypoint, which is what the next completion wait has to allow for.
+	prevDeg, travel, sent := fr.JointDegs, 0.0, false
 	for i, goal := range positions {
 		// The last waypoint always blocks; intermediate waypoints blend when
 		// Config.BlendTimeMs is set, otherwise they block too.
@@ -849,13 +926,21 @@ func (s *viamFairinoFairino) MoveThroughJointPositions(ctx context.Context, posi
 		if s.cfg.BlendTimeMs > 0 && i < len(positions)-1 {
 			blendT = float64(s.cfg.BlendTimeMs)
 		}
-		if err := s.moveToJointPositionsOnce(ctx, goal, blendT); err != nil {
-			if ctx.Err() != nil && i > 0 {
-				// Cancelled partway through: earlier waypoints may be queued
-				// on the controller (when blending) and would keep running.
+		goalDeg := inputsToDeg(goal)
+		travel += maxJointTravelDeg(prevDeg, goalDeg)
+		prevDeg = goalDeg
+		wpSent, err := s.moveToJointPositionsOnce(ctx, goal, blendT, travel)
+		sent = sent || wpSent
+		if err != nil {
+			if sent {
+				// Cancelled or failed partway through: this waypoint, and
+				// earlier ones still queued when blending, would keep running.
 				s.stopDetached()
 			}
 			return fmt.Errorf("waypoint %d/%d: %w", i+1, len(positions), err)
+		}
+		if blendT == blendTBlocking {
+			travel = 0
 		}
 	}
 	return nil
@@ -874,7 +959,8 @@ func (s *viamFairinoFairino) GoToInputs(ctx context.Context, inputSteps ...[]ref
 // Stop halts the arm. It first cancels any in-flight move this module is
 // running (opMgr.New blocks until that move has returned — it sends STOP
 // itself on the way out), then sends STOP (manual §2.35) regardless, so the
-// arm also stops if the motion was queued some other way.
+// arm also stops if the motion was queued some other way. The STOP goes out
+// even if ctx is already done (see commandClient.stop).
 func (s *viamFairinoFairino) Stop(ctx context.Context, extra map[string]interface{}) error {
 	ctx, done := s.opMgr.New(ctx)
 	defer done()
