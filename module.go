@@ -203,13 +203,11 @@ func (cfg *Config) Validate(path string) ([]string, []string, error) {
 	if n := len(cfg.CollisionLevels); n != 0 && n != 6 {
 		return nil, nil, fmt.Errorf("%s: collision_levels needs 6 values, one per joint, got %d", path, n)
 	}
-	levels := cfg.CollisionLevels
-	if cfg.CollisionLevel != 0 {
-		levels = []int{cfg.CollisionLevel}
-	}
-	for _, v := range levels {
-		if v < 1 || v > 10 {
-			return nil, nil, fmt.Errorf("%s: collision levels must be between 1 and 10, got %d", path, v)
+	if levels, ok := cfg.collisionLevels(); ok {
+		for _, v := range levels {
+			if v < 1 || v > 10 {
+				return nil, nil, fmt.Errorf("%s: collision levels must be between 1 and 10, got %d", path, v)
+			}
 		}
 	}
 
@@ -282,6 +280,10 @@ func newViamFairinoFairino(ctx context.Context, deps resource.Dependencies, rawC
 
 	return NewFairino(ctx, deps, rawConf.ResourceName(), conf, logger)
 }
+
+// badJointsFrameWait is how long construction waits for the arm's position
+// when bad_joints needs it and the status feed is still connecting.
+const badJointsFrameWait = 15 * time.Second
 
 // detectModelTimeout bounds the GetSoftwareVersion round-trip used for model
 // auto-detection at construction, so a dead/wrong host fails fast instead of
@@ -369,7 +371,13 @@ func NewFairino(ctx context.Context, deps resource.Dependencies, name resource.N
 	overrides := jointLimitOverrides{maxVelocityDegsPerSec: speedDegsFromPercent(conf.speedPercent())}
 	if len(conf.BadJoints) > 0 {
 		// A lock is only meaningful where the joint actually is, so this
-		// can't come up without a live position.
+		// can't come up without a live position. Give a reader that is
+		// still (re)connecting time to deliver one.
+		if frameErr != nil {
+			waitCtx, cancelWait := context.WithTimeout(ctx, badJointsFrameWait)
+			firstFrame, frameErr = status.waitForFrameThroughErrors(waitCtx)
+			cancelWait()
+		}
 		if frameErr != nil {
 			return nil, fmt.Errorf("bad_joints needs the arm's current joint positions at startup: %w", frameErr)
 		}
@@ -420,11 +428,11 @@ func NewFairino(ctx context.Context, deps resource.Dependencies, name resource.N
 		cmd:           cmd,
 		opMgr:         operation.NewSingleOperationManager(),
 	}
-	// Applied at every startup rather than saved on the controller, so a
+	// Applied on every connection rather than saved on the controller, so a
 	// failure here is an error: the arm must not run at a sensitivity other
 	// than the one configured.
 	if levels, ok := conf.collisionLevels(); ok {
-		if err := cmd.setAnticollision(ctx, levels); err != nil {
+		if err := cmd.setAnticollision(ctx, name.String(), levels); err != nil {
 			return nil, fmt.Errorf("setting collision levels %v: %w", levels, err)
 		}
 	}
@@ -672,11 +680,15 @@ func (s *viamFairinoFairino) MoveToJointPositions(ctx context.Context, positions
 	if err := s.checkJointTargets(ctx, [][]referenceframe.Input{positions}); err != nil {
 		return err
 	}
+	speedPct, err := s.moveSpeedPercent(nil, extra)
+	if err != nil {
+		return err
+	}
 	fr, err := s.latestFrame(ctx)
 	if err != nil {
 		return err
 	}
-	sent, err := s.moveToJointPositionsOnce(ctx, positions, blendTBlocking, s.moveSpeedPercent(nil, extra),
+	sent, err := s.moveToJointPositionsOnce(ctx, positions, blendTBlocking, speedPct,
 		maxJointTravelDeg(fr.JointDegs, inputsToDeg(positions)))
 	if err != nil && sent {
 		// Cancelled or failed after the MoveJ reached the controller, which
@@ -950,6 +962,7 @@ func (s *viamFairinoFairino) Close(ctx context.Context) error {
 	s.closeOnce.Do(func() {
 		s.cancelPlans(true)
 		s.opMgr.CancelRunning(ctx)
+		s.cmd.dropSetup(s.name.String())
 		releaseStatusClient(s.host, statusPort)
 		releaseCommandClient(s.host, commandPort)
 	})
@@ -1086,6 +1099,10 @@ func (s *viamFairinoFairino) MoveThroughJointPositions(ctx context.Context, posi
 	if err := s.checkJointTargets(ctx, positions); err != nil {
 		return err
 	}
+	speedPct, err := s.moveSpeedPercent(options, extra)
+	if err != nil {
+		return err
+	}
 	fr, err := s.latestFrame(ctx)
 	if err != nil {
 		return err
@@ -1093,7 +1110,6 @@ func (s *viamFairinoFairino) MoveThroughJointPositions(ctx context.Context, posi
 	// travel accumulates the joint travel queued since the last blocking
 	// waypoint, which is what the next completion wait has to allow for.
 	prevDeg, travel, sent := fr.JointDegs, 0.0, false
-	speedPct := s.moveSpeedPercent(options, extra)
 	for i, goal := range positions {
 		// The last waypoint always blocks; intermediate waypoints blend when
 		// Config.BlendTimeMs is set, otherwise they block too.

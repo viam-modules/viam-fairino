@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	arm "go.viam.com/rdk/components/arm"
+	"go.viam.com/rdk/referenceframe"
 	rdkutils "go.viam.com/rdk/utils"
 )
 
@@ -33,10 +34,34 @@ func TestMoveSpeedPercent(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			cfg := tc.cfg
 			s.cfg = &cfg
-			if got := s.moveSpeedPercent(tc.opts, tc.extra); math.Abs(got-tc.want) > 1e-9 {
-				t.Errorf("got %v want %v", got, tc.want)
+			got, err := s.moveSpeedPercent(tc.opts, tc.extra)
+			if err != nil || math.Abs(got-tc.want) > 1e-9 {
+				t.Errorf("got %v, %v want %v", got, err, tc.want)
 			}
 		})
+	}
+}
+
+// NaN compares false against both clamp bounds, so it has to be caught before
+// it reaches the controller as the text "NaN".
+func TestMoveSpeedRejectsNonFinite(t *testing.T) {
+	s, _ := newControllerTestArm(t, newFakeController(t), restingFrame([6]float64{}))
+	for name, tc := range map[string]struct {
+		opts  *arm.MoveOptions
+		extra map[string]interface{}
+	}{
+		"speed_d NaN":    {extra: map[string]interface{}{"speed_d": math.NaN()}},
+		"speed_r +Inf":   {extra: map[string]interface{}{"speed_r": math.Inf(1)}},
+		"MaxVelRads NaN": {opts: &arm.MoveOptions{MaxVelRads: math.NaN()}},
+		"per-joint +Inf": {opts: &arm.MoveOptions{MaxVelRadsJoints: []float64{1, math.Inf(1)}}},
+	} {
+		if _, err := s.moveSpeedPercent(tc.opts, tc.extra); err == nil {
+			t.Errorf("%s: expected an error", name)
+		}
+	}
+	if err := s.MoveToJointPositions(context.Background(), make([]referenceframe.Input, 6),
+		map[string]interface{}{"speed_d": math.NaN()}); err == nil {
+		t.Error("MoveToJointPositions accepted a NaN speed")
 	}
 }
 
@@ -52,7 +77,7 @@ func TestSetAndGetSpeedDoCommand(t *testing.T) {
 	if got := resp["speed_degs_per_sec"]; got != 45.0 {
 		t.Errorf("get_speed: got %v want 45", got)
 	}
-	for _, bad := range []interface{}{0.0, -5.0, 181.0, "fast"} {
+	for _, bad := range []interface{}{0.0, -5.0, 181.0, "fast", math.NaN(), math.Inf(1)} {
 		if _, err := s.DoCommand(context.Background(), map[string]interface{}{"command": "set_speed", "speed_degs_per_sec": bad}); err == nil {
 			t.Errorf("set_speed %v: expected an error", bad)
 		}

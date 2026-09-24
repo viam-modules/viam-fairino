@@ -3,6 +3,7 @@ package viamfairino
 import (
 	"context"
 	"errors"
+	"fmt"
 	"testing"
 	"time"
 
@@ -131,12 +132,51 @@ func TestCollisionLevelsResolve(t *testing.T) {
 func TestSetAnticollisionFormat(t *testing.T) {
 	fc := newFakeController(t)
 	s, _ := newControllerTestArm(t, fc, restingFrame([6]float64{}))
-	if err := s.cmd.setAnticollision(context.Background(), [6]int{5, 5, 5, 5, 5, 3}); err != nil {
+	if err := s.cmd.setAnticollision(context.Background(), "arm", [6]int{5, 5, 5, 5, 5, 3}); err != nil {
 		t.Fatal(err)
 	}
 	fc.mu.Lock()
 	defer fc.mu.Unlock()
 	if want := "SetAnticollision(0,{5,5,5,5,5,3},0)"; len(fc.commands) != 1 || fc.commands[0] != want {
 		t.Errorf("got %v want [%s]", fc.commands, want)
+	}
+}
+
+// Collision levels live only for the session, so they must be reapplied on
+// every new connection before anything else uses it — except a STOP, which
+// never waits for setup.
+func TestCollisionLevelsReappliedOnReconnect(t *testing.T) {
+	fc := newFakeController(t)
+	s, _ := newControllerTestArm(t, fc, restingFrame([6]float64{}))
+	ctx := context.Background()
+	if err := s.cmd.setAnticollision(ctx, "arm", [6]int{2, 2, 2, 2, 2, 2}); err != nil {
+		t.Fatal(err)
+	}
+	_ = s.cmd.close() // the connection drops (e.g. the controller restarts)
+	if err := s.cmd.stop(ctx); err != nil {
+		t.Fatal(err)
+	}
+	_, _, _ = s.cmd.getRobotErrorCode(ctx) // any command; the fake's "1" won't parse, which doesn't matter
+	want := []string{"SetAnticollision", "STOP", "SetAnticollision", "GetRobotErrorCode"}
+	if got := fc.sent(); fmt.Sprint(got) != fmt.Sprint(want) {
+		t.Errorf("got %v, want %v", got, want)
+	}
+
+	// If the controller refuses the levels, nothing but STOP goes out.
+	fc.setReply(func(cmdID int, _ string) string {
+		if cmdID == cmdIDSetAnticollision {
+			return "14"
+		}
+		return "1"
+	})
+	_ = s.cmd.close()
+	if _, err := s.cmd.getForwardKin(ctx, [6]float64{}); err == nil {
+		t.Error("command sent on a connection whose collision levels were refused")
+	}
+	if err := s.cmd.stop(ctx); err != nil {
+		t.Errorf("STOP refused: %v", err)
+	}
+	if n := fc.count("GetForwardKin"); n != 0 {
+		t.Errorf("GetForwardKin reached the controller %d times", n)
 	}
 }

@@ -2,9 +2,14 @@ package viamfairino
 
 import (
 	"bytes"
+	"context"
 	"encoding/binary"
+	"errors"
 	"math"
 	"testing"
+	"time"
+
+	"go.viam.com/rdk/logging"
 )
 
 // Test values chosen to avoid 0x5A ('Z') byte pairs appearing in the payload
@@ -212,5 +217,25 @@ func TestSumChecksumMatchesTestPy(t *testing.T) {
 	want := uint16((0x5A + 0x5A + 0xFF + 0x01 + 0x02) & 0xFFFF)
 	if got := sumChecksum(data); got != want {
 		t.Errorf("checksum: got %#x want %#x", got, want)
+	}
+}
+
+// bad_joints needs a position at startup; a reader still reconnecting after a
+// dial error must be given the chance to deliver one.
+func TestWaitForFrameThroughErrors(t *testing.T) {
+	sc := newStatusClient("127.0.0.1", statusPort, logging.NewTestLogger(t))
+	sc.recordError(errors.New("status port dial: connection refused"))
+	go func() {
+		time.Sleep(100 * time.Millisecond)
+		setTestFrame(sc, restingFrame([6]float64{1, 2, 3, 4, 5, 6}))
+	}()
+	if _, err := sc.waitForFrame(context.Background()); err == nil {
+		t.Error("waitForFrame should report the dial error at once")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	fr, err := sc.waitForFrameThroughErrors(ctx)
+	if err != nil || fr.JointDegs[0] != 1 {
+		t.Errorf("got %v, %v", fr.JointDegs, err)
 	}
 }

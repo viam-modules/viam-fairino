@@ -81,6 +81,13 @@ type commandClient struct {
 
 	lock cmdLock // serializes one in-flight request
 
+	// setup holds the commands resent on every new connection, by owner (see
+	// applyOnEveryConnection); needSetup is set by connect until they have
+	// been. needSetup is guarded by lock.
+	setupMu   sync.Mutex
+	setup     map[string]setupCommand
+	needSetup bool
+
 	connMu sync.RWMutex
 	conn   net.Conn
 	reader *bufio.Reader
@@ -312,9 +319,109 @@ func (c *commandClient) do(ctx context.Context, cmdID int, data string, urgent b
 		if err := c.connect(ctx); err != nil {
 			return "", err
 		}
-		c.connMu.RLock()
-		conn = c.conn
-		c.connMu.RUnlock()
+		c.needSetup = true
+	}
+	// A STOP goes straight out; the setup waits for the next command.
+	if c.needSetup && !urgent {
+		if err := c.runSetup(ctx); err != nil {
+			_ = c.close()
+			return "", fmt.Errorf("command %q not sent: %w", data, err)
+		}
+	}
+	return c.exchange(ctx, cmdID, data)
+}
+
+// setupCommand is one of the commands resent on every new connection.
+type setupCommand struct {
+	cmdID int
+	data  string
+}
+
+// applyOnEveryConnection sends an ack-only command now, and again on every
+// new connection before any other command uses it, under owner (replacing any
+// previous one). It is for settings the controller only holds for the
+// session, which a dropped connection or a controller restart would otherwise
+// silently reset, so a connection whose setup fails is dropped rather than
+// used: no command goes out until it succeeds, STOP excepted.
+func (c *commandClient) applyOnEveryConnection(ctx context.Context, owner string, cmdID int, data string) error {
+	if err := c.lock.acquire(ctx, false); err != nil {
+		return err
+	}
+	defer c.lock.release()
+	c.setupMu.Lock()
+	if c.setup == nil {
+		c.setup = map[string]setupCommand{}
+	}
+	c.setup[owner] = setupCommand{cmdID, data}
+	c.setupMu.Unlock()
+
+	c.connMu.RLock()
+	connected := c.conn != nil
+	c.connMu.RUnlock()
+	if !connected || c.needSetup {
+		// The next command runs every setup command, this one included;
+		// run them now so a failure is reported here.
+		if !connected {
+			if err := c.connect(ctx); err != nil {
+				c.dropSetup(owner)
+				return err
+			}
+		}
+		if err := c.runSetup(ctx); err != nil {
+			c.dropSetup(owner)
+			_ = c.close()
+			return err
+		}
+		return nil
+	}
+	if err := c.exchangeAck(ctx, cmdID, data); err != nil {
+		c.dropSetup(owner)
+		return err
+	}
+	return nil
+}
+
+// dropSetup forgets owner's setup command.
+func (c *commandClient) dropSetup(owner string) {
+	c.setupMu.Lock()
+	delete(c.setup, owner)
+	c.setupMu.Unlock()
+}
+
+// runSetup sends every setup command on the current connection. Caller holds
+// c.lock.
+func (c *commandClient) runSetup(ctx context.Context) error {
+	c.setupMu.Lock()
+	cmds := make([]setupCommand, 0, len(c.setup))
+	for _, sc := range c.setup {
+		cmds = append(cmds, sc)
+	}
+	c.setupMu.Unlock()
+	for _, sc := range cmds {
+		if err := c.exchangeAck(ctx, sc.cmdID, sc.data); err != nil {
+			return fmt.Errorf("reapplying %q on a new connection: %w", sc.data, err)
+		}
+	}
+	c.needSetup = false
+	return nil
+}
+
+func (c *commandClient) exchangeAck(ctx context.Context, cmdID int, data string) error {
+	resp, err := c.exchange(ctx, cmdID, data)
+	if err != nil {
+		return err
+	}
+	return parseErrcode(resp)
+}
+
+// exchange writes one frame on the current connection and reads its reply.
+// Caller holds c.lock and has connected.
+func (c *commandClient) exchange(ctx context.Context, cmdID int, data string) (string, error) {
+	c.connMu.RLock()
+	conn := c.conn
+	c.connMu.RUnlock()
+	if conn == nil {
+		return "", fmt.Errorf("command %q: not connected", data)
 	}
 
 	reqCnt := int(c.cnt.Add(1))
@@ -793,17 +900,15 @@ func (c *commandClient) moveGripper(ctx context.Context, p moveGripperParams) er
 }
 
 // setAnticollision sends SetAnticollision() (§5.4.4, CMD_ID 305) with
-// per-joint collision levels, 1 (most sensitive) to 10. configFlag is 0 so the
-// controller's saved configuration is left alone: the module reapplies the
-// levels every time it starts instead.
-func (c *commandClient) setAnticollision(ctx context.Context, levels [6]int) error {
+// per-joint collision levels, 1 (most sensitive) to 10, now and again on
+// every new connection (applyOnEveryConnection) under owner. configFlag is 0
+// so the controller's saved configuration is left alone: the module applies
+// its own levels whenever it (re)connects instead, so a controller that
+// restarts under a running module can't come back at its saved sensitivity.
+func (c *commandClient) setAnticollision(ctx context.Context, owner string, levels [6]int) error {
 	data := fmt.Sprintf("SetAnticollision(0,{%d,%d,%d,%d,%d,%d},0)",
 		levels[0], levels[1], levels[2], levels[3], levels[4], levels[5])
-	resp, err := c.send(ctx, cmdIDSetAnticollision, data)
-	if err != nil {
-		return err
-	}
-	return parseErrcode(resp)
+	return c.applyOnEveryConnection(ctx, owner, cmdIDSetAnticollision, data)
 }
 
 // getRobotErrorCode sends GetRobotErrorCode() (§6.3.16, CMD_ID 1163) and

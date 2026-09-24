@@ -2,6 +2,7 @@ package viamfairino
 
 import (
 	"fmt"
+	"math"
 
 	arm "go.viam.com/rdk/components/arm"
 	rdkutils "go.viam.com/rdk/utils"
@@ -42,7 +43,8 @@ func (s *viamFairinoFairino) currentSpeedPercent() float64 {
 }
 
 func (s *viamFairinoFairino) setSpeedDegsPerSec(degsPerSec float64) error {
-	if degsPerSec <= 0 || degsPerSec > maxJointSpeedDegsPerSec {
+	// Written so NaN, which compares false against everything, fails too.
+	if !(degsPerSec > 0 && degsPerSec <= maxJointSpeedDegsPerSec) {
 		return fmt.Errorf("speed must be in (0, %v] degrees per second, got %v", maxJointSpeedDegsPerSec, degsPerSec)
 	}
 	s.speedMu.Lock()
@@ -55,9 +57,16 @@ func (s *viamFairinoFairino) setSpeedDegsPerSec(degsPerSec float64) error {
 // the current speed, in the same order viam-ufactory-xarm applies them:
 // MoveOptions first, then extra's speed_r/speed_d. MoveJ takes a single speed
 // for all joints, so per-joint limits are honored by moving at the slowest.
-func (s *viamFairinoFairino) moveSpeedPercent(opts *arm.MoveOptions, extra map[string]interface{}) float64 {
+// A NaN or infinite speed is an error: NaN would slip past the clamp below
+// and reach the controller as the literal text "NaN".
+func (s *viamFairinoFairino) moveSpeedPercent(opts *arm.MoveOptions, extra map[string]interface{}) (float64, error) {
 	pct := s.currentSpeedPercent()
 	if opts != nil {
+		for _, v := range append([]float64{opts.MaxVelRads}, opts.MaxVelRadsJoints...) {
+			if math.IsNaN(v) || math.IsInf(v, 0) {
+				return 0, fmt.Errorf("move speed %v is not a number", v)
+			}
+		}
 		if opts.MaxVelRads > 0 {
 			pct = speedPercentFromDegs(rdkutils.RadToDeg(opts.MaxVelRads))
 		}
@@ -71,22 +80,29 @@ func (s *viamFairinoFairino) moveSpeedPercent(opts *arm.MoveOptions, extra map[s
 			pct = speedPercentFromDegs(rdkutils.RadToDeg(slowest))
 		}
 	}
-	if v, ok := floatArg(extra, "speed_r"); ok {
-		pct = speedPercentFromDegs(rdkutils.RadToDeg(v))
-	}
-	if v, ok := floatArg(extra, "speed_d"); ok {
+	for _, key := range []string{"speed_r", "speed_d"} {
+		v, ok := floatArg(extra, key)
+		if !ok {
+			continue
+		}
+		if math.IsNaN(v) || math.IsInf(v, 0) {
+			return 0, fmt.Errorf("%s %v is not a number", key, v)
+		}
+		if key == "speed_r" {
+			v = rdkutils.RadToDeg(v)
+		}
 		pct = speedPercentFromDegs(v)
 	}
 
 	switch {
 	case pct < minSpeedPercent:
 		s.logger.Warnf("requested joint speed %.2f%% is below the minimum, using %.0f%%", pct, minSpeedPercent)
-		return minSpeedPercent
+		return minSpeedPercent, nil
 	case pct > maxSpeedPercent:
 		s.logger.Warnf("requested joint speed %.2f%% exceeds the maximum, using %.0f%%", pct, maxSpeedPercent)
-		return maxSpeedPercent
+		return maxSpeedPercent, nil
 	}
-	return pct
+	return pct, nil
 }
 
 // floatArg reads a numeric value from a DoCommand/extra map, which arrive as

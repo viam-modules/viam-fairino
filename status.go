@@ -82,6 +82,26 @@ func (c *statusClient) latest() (statusFrame, bool, error) {
 	return c.frame, c.have, c.err
 }
 
+// waitForFrameThroughErrors waits for a frame until ctx is done, riding out
+// connection errors (the reader keeps retrying) that waitForFrame returns at
+// once, and returns the last one if no frame arrives.
+func (c *statusClient) waitForFrameThroughErrors(ctx context.Context) (statusFrame, error) {
+	for {
+		fr, ok, err := c.latest()
+		if ok {
+			return fr, nil
+		}
+		select {
+		case <-ctx.Done():
+			if err == nil {
+				err = ctx.Err()
+			}
+			return statusFrame{}, fmt.Errorf("no status frame: %w", err)
+		case <-time.After(20 * time.Millisecond):
+		}
+	}
+}
+
 func (c *statusClient) waitForFrame(ctx context.Context) (statusFrame, error) {
 	deadline := time.Now().Add(2 * time.Second)
 	if d, ok := ctx.Deadline(); ok && d.Before(deadline) {
@@ -258,9 +278,15 @@ func sleepCtx(ctx context.Context, d time.Duration) bool {
 // That makes an independent status connection per resource unusable: an arm and
 // a gripper on the same controller would fight over the single slot, and
 // whichever lost would report a dead status feed. So resources share one reader
-// per host:port, reference-counted, started on the first acquire and stopped on
-// the last release. One connection, one reader goroutine, every resource
-// reading the same frames.
+// per host:port, reference-counted, started on the first acquire and stopped
+// statusReleaseGrace after the last release. One connection, one reader
+// goroutine, every resource reading the same frames.
+//
+// The grace period is for reconfiguration: RDK closes a resource before it
+// builds the replacement, and a reader stopped in between would leave the new
+// one redialing into the FIN_WAIT_2 block above — with no frames for up to a
+// minute, and a failed construction for anything that needs one at startup
+// (bad_joints).
 // ---------------------------------------------------------------------------
 
 var (
@@ -271,7 +297,12 @@ var (
 type sharedStatusEntry struct {
 	client *statusClient
 	refs   int
+	idle   *time.Timer // the pending stop while refs == 0
 }
+
+// statusReleaseGrace is how long the shared reader outlives its last
+// reference (see above). A variable so tests can shorten it.
+var statusReleaseGrace = 10 * time.Second
 
 // acquireStatusClient returns the shared reader for host:port, starting it on
 // first use. Every acquire must be paired with a releaseStatusClient.
@@ -282,6 +313,12 @@ func acquireStatusClient(ctx context.Context, host string, port int, logger logg
 	defer sharedStatusMu.Unlock()
 
 	if e, ok := sharedStatusClients[key]; ok {
+		if e.idle != nil {
+			// If it already fired, its func sees refs > 0 and leaves the
+			// reader running.
+			e.idle.Stop()
+			e.idle = nil
+		}
 		e.refs++
 		logger.Debugw("reusing shared status client", "addr", key, "refs", e.refs)
 		return e.client
@@ -296,24 +333,32 @@ func acquireStatusClient(ctx context.Context, host string, port int, logger logg
 }
 
 // releaseStatusClient drops one reference to the shared reader for host:port,
-// stopping it when the last resource using it goes away.
+// stopping it statusReleaseGrace after the last resource using it goes away,
+// unless one acquires it again first.
 func releaseStatusClient(host string, port int) {
 	key := net.JoinHostPort(host, strconv.Itoa(port))
 
 	sharedStatusMu.Lock()
+	defer sharedStatusMu.Unlock()
 	e, ok := sharedStatusClients[key]
-	if !ok {
-		sharedStatusMu.Unlock()
+	if !ok || e.refs == 0 {
 		return
 	}
 	e.refs--
 	if e.refs > 0 {
-		sharedStatusMu.Unlock()
 		return
 	}
-	delete(sharedStatusClients, key)
-	sharedStatusMu.Unlock()
-
-	// Stop outside the lock: it waits for the reader goroutine to exit.
-	e.client.stop()
+	var timer *time.Timer
+	timer = time.AfterFunc(statusReleaseGrace, func() {
+		sharedStatusMu.Lock()
+		if sharedStatusClients[key] != e || e.refs > 0 || e.idle != timer {
+			sharedStatusMu.Unlock()
+			return
+		}
+		delete(sharedStatusClients, key)
+		sharedStatusMu.Unlock()
+		// Stop outside the lock: it waits for the reader goroutine to exit.
+		e.client.stop()
+	})
+	e.idle = timer
 }

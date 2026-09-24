@@ -232,32 +232,43 @@ var _ resource.Resource = (*fairinoGripper)(nil)
 
 // The controller admits one status-port client at a time, so resources on the
 // same host must share a single reader: two acquires yield the same client, and
-// only the last release stops it.
+// only the last release stops it — after statusReleaseGrace, so a resource
+// rebuilt by a reconfigure picks up the same live reader.
 func TestSharedStatusClientRefcount(t *testing.T) {
 	logger := logging.NewTestLogger(t)
 	host := "203.0.113.1" // TEST-NET-3: never routable, so the reader just retries
+	key := net.JoinHostPort(host, strconv.Itoa(statusPort))
+	registered := func() bool {
+		sharedStatusMu.Lock()
+		defer sharedStatusMu.Unlock()
+		_, ok := sharedStatusClients[key]
+		return ok
+	}
+	defer func(g time.Duration) { statusReleaseGrace = g }(statusReleaseGrace)
+	statusReleaseGrace = 200 * time.Millisecond
 
 	a := acquireStatusClient(context.Background(), host, statusPort, logger)
 	b := acquireStatusClient(context.Background(), host, statusPort, logger)
 	if a != b {
 		t.Fatal("two acquires for the same host returned different clients")
 	}
-
 	releaseStatusClient(host, statusPort)
-	sharedStatusMu.Lock()
-	_, stillThere := sharedStatusClients[net.JoinHostPort(host, strconv.Itoa(statusPort))]
-	sharedStatusMu.Unlock()
-	if !stillThere {
+	if !registered() {
 		t.Error("client dropped while a reference was still held")
 	}
 
+	// Released and reacquired within the grace period: the same reader.
 	releaseStatusClient(host, statusPort)
-	sharedStatusMu.Lock()
-	_, stillThere = sharedStatusClients[net.JoinHostPort(host, strconv.Itoa(statusPort))]
-	sharedStatusMu.Unlock()
-	if stillThere {
-		t.Error("client not released after the last reference went away")
+	if c := acquireStatusClient(context.Background(), host, statusPort, logger); c != a {
+		t.Error("a reacquire within the grace period started a new reader")
 	}
+	time.Sleep(2 * statusReleaseGrace)
+	if !registered() {
+		t.Error("reader stopped although it was reacquired")
+	}
+
+	releaseStatusClient(host, statusPort)
+	waitFor(t, "the reader to stop after the grace period", func() bool { return !registered() })
 
 	// A release with no outstanding acquire must be a no-op, not a panic.
 	releaseStatusClient(host, statusPort)
