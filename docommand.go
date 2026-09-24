@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 )
 
 // Digital outputs SetDO/SetToolDO can drive: the control box has 16 (status
@@ -45,7 +46,7 @@ func (s *viamFairinoFairino) getState(ctx context.Context) (map[string]interface
 		"motion_done":    fr.MotionDone,
 		"emergency_stop": fr.EmergencyStop,
 		"fault":          faultCodeString(fr.ErrorCode),
-		"move_running":   s.opMgr.OpRunning(),
+		"move_running":   s.opMgr.OpRunning() || s.planning(),
 	}, nil
 }
 
@@ -65,18 +66,33 @@ func (s *viamFairinoFairino) setDigitalOutput(ctx context.Context, cmd map[strin
 	if tool {
 		n = numToolDOs
 	}
-	index, ok := floatArg(cmd, "index")
-	if !ok || index != float64(int(index)) || index < 0 || int(index) >= n {
+	index, ok, err := intArg(cmd, "index", 0, n-1)
+	if err != nil || !ok {
 		return nil, fmt.Errorf(`%s needs an integer "index" from 0 to %d`, cmd["command"], n-1)
 	}
 	on, ok := cmd["on"].(bool)
 	if !ok {
 		return nil, fmt.Errorf(`%s needs a boolean "on"`, cmd["command"])
 	}
-	if err := s.cmd.setDO(ctx, tool, int(index), on); err != nil {
+	if err := s.cmd.setDO(ctx, tool, index, on); err != nil {
 		return nil, err
 	}
 	return map[string]interface{}{"index": index, "on": on}, nil
 }
 
 var errUnknownCommand = errors.New("unknown command")
+
+// intArg reads an optional integer in [lo, hi] from a DoCommand; ok is false
+// when the key is absent, and anything else — a string, a fraction, NaN, out
+// of range — is an error rather than a silent zero.
+func intArg(cmd map[string]interface{}, key string, lo, hi int) (v int, ok bool, err error) {
+	if _, present := cmd[key]; !present {
+		return 0, false, nil
+	}
+	f, isNum := floatArg(cmd, key)
+	// Written so NaN, which compares false against everything, fails too.
+	if !isNum || !(f >= float64(lo) && f <= float64(hi)) || f != math.Trunc(f) {
+		return 0, false, fmt.Errorf("%s must be an integer from %d to %d, got %v", key, lo, hi, cmd[key])
+	}
+	return int(f), true, nil
+}

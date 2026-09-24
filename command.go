@@ -912,22 +912,17 @@ func (c *commandClient) setAnticollision(ctx context.Context, owner string, leve
 }
 
 // setDO sends SetDO() (§3.1.1, CMD_ID 204) for a control-box output, or
-// SetToolDO() (§3.1.4, CMD_ID 210) for a tool output. smooth=0 and
-// isNoBlock=0 are the vendor SDK's defaults.
+// SetToolDO() (§3.1.4, CMD_ID 210) for a tool output. smooth=0 is the vendor
+// SDK's default. isNoBlock is 1, not the SDK's default 0: a blocking IO
+// command is queued behind the motion in progress, so the output would only
+// switch once the arm stopped, and the ack — and with it the command
+// connection, and any STOP waiting for it — would be held until then.
 func (c *commandClient) setDO(ctx context.Context, tool bool, index int, on bool) error {
 	name, cmdID := "SetDO", cmdIDSetDO
 	if tool {
 		name, cmdID = "SetToolDO", cmdIDSetToolDO
 	}
-	state := 0
-	if on {
-		state = 1
-	}
-	resp, err := c.send(ctx, cmdID, fmt.Sprintf("%s(%d,%d,0,0)", name, index, state))
-	if err != nil {
-		return err
-	}
-	return parseErrcode(resp)
+	return c.sendAck(ctx, cmdID, fmt.Sprintf("%s(%d,%d,0,1)", name, index, boolInt(on)))
 }
 
 // getRobotErrorCode sends GetRobotErrorCode() (§6.3.16, CMD_ID 1163) and

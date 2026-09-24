@@ -3,6 +3,7 @@ package viamfairino
 import (
 	"context"
 	"errors"
+	"math"
 	"testing"
 )
 
@@ -60,7 +61,7 @@ func TestDoCommandSetDigitalOutputs(t *testing.T) {
 	fc.mu.Lock()
 	got := append([]string(nil), fc.commands...)
 	fc.mu.Unlock()
-	want := []string{"SetDO(15,1,0,0)", "SetToolDO(1,0,0,0)"}
+	want := []string{"SetDO(15,1,0,1)", "SetToolDO(1,0,0,1)"}
 	if len(got) != 2 || got[0] != want[0] || got[1] != want[1] {
 		t.Errorf("got %v want %v", got, want)
 	}
@@ -85,5 +86,23 @@ func TestDoCommandUnknown(t *testing.T) {
 	s, _ := newControllerTestArm(t, newFakeController(t), restingFrame([6]float64{}))
 	if _, err := s.DoCommand(context.Background(), map[string]interface{}{"command": "nope"}); !errors.Is(err, errUnknownCommand) {
 		t.Errorf("got %v, want errUnknownCommand", err)
+	}
+}
+
+func TestIntArg(t *testing.T) {
+	cmd := map[string]interface{}{"ok": 3.0, "int": 2, "frac": 1.5, "str": "3", "nan": math.NaN(), "big": 20.0}
+	if v, ok, err := intArg(cmd, "ok", 0, 15); v != 3 || !ok || err != nil {
+		t.Errorf("ok: got %v %v %v", v, ok, err)
+	}
+	if v, ok, err := intArg(cmd, "int", 0, 15); v != 2 || !ok || err != nil {
+		t.Errorf("int: got %v %v %v", v, ok, err)
+	}
+	if _, ok, err := intArg(cmd, "missing", 0, 15); ok || err != nil {
+		t.Errorf("missing: got %v %v", ok, err)
+	}
+	for _, key := range []string{"frac", "str", "nan", "big"} {
+		if _, _, err := intArg(cmd, key, 0, 15); err == nil {
+			t.Errorf("%s: expected an error", key)
+		}
 	}
 }

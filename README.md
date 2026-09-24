@@ -188,7 +188,7 @@ data, e-stop, motion-done, and frame diagnostics (`payload_len`,
 | `{"command": "get_state"}` | program state, robot mode, motion done, e-stop, fault, and whether a move of ours is running |
 | `{"command": "get_error"}` | the status frame's fault plus `GetRobotErrorCode`'s `main_code`/`sub_code` |
 | `{"command": "load"}` | joint torques, N·m (viam-ufactory-xarm's `load`) |
-| `{"command": "set_do", "index": 0-15, "on": true}` | set a control-box digital output (`SetDO`) |
+| `{"command": "set_do", "index": 0-15, "on": true}` | set a control-box digital output (`SetDO`, non-blocking: it switches at once, even mid-move) |
 | `{"command": "set_tool_do", "index": 0-1, "on": true}` | set a tool digital output (`SetToolDO`) |
 
 Output states read back through `status` (`cl_dgt_output_h/l`, `tl_dgt_output_l`).
