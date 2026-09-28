@@ -7,6 +7,7 @@ import (
 	"net"
 	"strconv"
 	"testing"
+	"time"
 
 	"go.viam.com/rdk/components/gripper"
 	"go.viam.com/rdk/logging"
@@ -292,4 +293,101 @@ func TestSharedCommandClientRefcount(t *testing.T) {
 
 	// A release with no outstanding acquire must be a no-op, not a panic.
 	releaseCommandClient(host, commandPort)
+}
+
+// newCommandGripper is newTestGripper wired to a fake command port.
+func newCommandGripper(t *testing.T, fc *fakeController, fr statusFrame) *fairinoGripper {
+	t.Helper()
+	g := newTestGripper(t, fr)
+	g.cmd = newCommandClient("127.0.0.1", fc.port(), logging.NewTestLogger(t))
+	t.Cleanup(func() { _ = g.cmd.close() })
+	g.speed, g.force, g.maxTime, g.grabPos = 50, 50, 30000, 0
+	return g
+}
+
+// MoveGripper goes out non-blocking, so the shared command connection is free
+// for the arm's STOP while the fingers travel, and Grab follows the motion on
+// the status feed: it returns only once a post-move frame shows them stopped.
+func TestGrabIsNonBlockingAndWaitsForTheStatusFeed(t *testing.T) {
+	fc := newFakeController(t)
+	g := newCommandGripper(t, fc, frameWith(t, gripperMotionStopped, 100))
+
+	type result struct {
+		holding bool
+		err     error
+	}
+	done := make(chan result, 1)
+	go func() {
+		holding, err := g.Grab(context.Background(), nil)
+		done <- result{holding, err}
+	}()
+	waitFor(t, "MoveGripper", func() bool { return fc.count("MoveGripper") == 1 })
+	fc.mu.Lock()
+	sent := fc.commands[0]
+	fc.mu.Unlock()
+	if sent != "MoveGripper(1,0,50,50,30000,1,0,0,0,0)" {
+		t.Errorf("sent %q, want a non-blocking (block=1) MoveGripper", sent)
+	}
+
+	// The connection is free while the fingers move.
+	if err := g.cmd.stop(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	setTestFrame(g.status, frameWith(t, gripperMotionMoving, 50))
+	time.Sleep(100 * time.Millisecond)
+	select {
+	case r := <-done:
+		t.Fatalf("Grab returned %+v while the fingers were still moving", r)
+	default:
+	}
+	setTestFrame(g.status, frameWith(t, gripperMotionClamped, 20))
+	select {
+	case r := <-done:
+		if r.err != nil || !r.holding {
+			t.Errorf("got %+v, want holding", r)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Grab didn't return once the fingers stopped")
+	}
+}
+
+// A gripper already at the target never reports moving; the move counts as
+// done once gripperStartGrace passes with fresh frames saying so.
+func TestGripperMoveWithNoMotionFinishesAfterGrace(t *testing.T) {
+	fc := newFakeController(t)
+	g := newCommandGripper(t, fc, frameWith(t, gripperMotionStopped, 100))
+	stop := make(chan struct{})
+	defer close(stop)
+	go func() { // a live feed: fresh frames, fingers never moving
+		for {
+			select {
+			case <-stop:
+				return
+			case <-time.After(20 * time.Millisecond):
+				setTestFrame(g.status, frameWith(t, gripperMotionStopped, 100))
+			}
+		}
+	}()
+	start := time.Now()
+	if err := g.Open(context.Background(), nil); err != nil {
+		t.Fatal(err)
+	}
+	if elapsed := time.Since(start); elapsed < gripperStartGrace {
+		t.Errorf("Open returned after %v, before the %v grace", elapsed, gripperStartGrace)
+	}
+}
+
+// A status feed that freezes mid-move gives no way to see the fingers stop,
+// so the move fails rather than waiting out max_time.
+func TestGripperMoveFailsWhenTheFeedFreezes(t *testing.T) {
+	fc := newFakeController(t)
+	g := newCommandGripper(t, fc, frameWith(t, gripperMotionStopped, 100))
+	setTestFrame(g.status, frameWith(t, gripperMotionMoving, 50)) // then nothing more
+	start := time.Now()
+	if err := g.Open(context.Background(), nil); err == nil {
+		t.Fatal("expected an error")
+	}
+	if elapsed := time.Since(start); elapsed > 3*statusFeedLostTimeout {
+		t.Errorf("took %v to notice", elapsed)
+	}
 }
