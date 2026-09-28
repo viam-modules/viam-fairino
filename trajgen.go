@@ -122,14 +122,38 @@ func (s *viamFairinoFairino) generateTrajectory(
 		return nil, fmt.Errorf("trajectory generator returned configurations_rads of shape %v and sample_times_sec of shape %v, "+
 			"want (N, %d) and (N) float64", configs.Shape(), times.Shape(), dof)
 	}
-	points := make([]arm.TrajectoryPoint, len(timeData))
+	points := make([]arm.TrajectoryPoint, 0, len(timeData))
 	for i, t := range timeData {
-		points[i] = arm.TrajectoryPoint{
+		p := arm.TrajectoryPoint{
 			Time:      time.Duration(math.Round(t * float64(time.Second))),
 			Positions: data[i*dof : (i+1)*dof],
 		}
+		points = foldCloseSample(points, p)
 	}
 	return points, nil
+}
+
+// foldCloseSample appends p to points unless it comes less than
+// minServoIntervalSec after the last one, which ServoJ can't be given. The
+// generator's last sample is the final waypoint at the trajectory's exact
+// duration, rarely a whole sample period after the one before, so this is
+// routinely hit there. Such a sample replaces the previous one instead, whose
+// interval it takes over (at most one sample period plus 1 ms, well within
+// maxServoIntervalSec), keeping the final waypoint and its time; after the
+// start, which must stay, it is pushed back to the minimum instead.
+func foldCloseSample(points []arm.TrajectoryPoint, p arm.TrajectoryPoint) []arm.TrajectoryPoint {
+	minGap := time.Duration(minServoIntervalSec * float64(time.Second))
+	n := len(points)
+	switch {
+	case n == 0 || p.Time-points[n-1].Time >= minGap:
+		return append(points, p)
+	case n == 1:
+		p.Time = points[0].Time + minGap
+		return append(points, p)
+	default:
+		points[n-1] = p
+		return points
+	}
 }
 
 // moveWithTrajGen executes waypoints as a generated trajectory, every sample

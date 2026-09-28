@@ -67,6 +67,52 @@ func TestStreamedSendsServoJPerPoint(t *testing.T) {
 	}
 }
 
+// Points closer than ServoJ's minimum cycle must stop the stream: its cmdT
+// would reach the controller out of range, or rounded to 0.
+func TestStreamedRejectsTooClosePoints(t *testing.T) {
+	fc := newFakeController(t)
+	s, _ := newControllerTestArm(t, fc, restingFrame([6]float64{}))
+	pts := streamPoints(3, 8*time.Millisecond)
+	pts[2].Time = pts[1].Time + 20*time.Microsecond
+	_, err := stream(t, s, pts)
+	if err == nil || !strings.Contains(err.Error(), "at least") {
+		t.Fatalf("got %v, want a spacing error", err)
+	}
+	if n := fc.count("ServoJ"); n != 1 {
+		t.Errorf("sent %d ServoJ, want only the one before the bad point: %v", n, fc.sent())
+	}
+}
+
+// Timer wake-ups and per-point checks make every point a little late. That
+// lateness must not pile up: a stream has to finish close to its planned
+// duration, not stretch by the overhead of every point.
+func TestStreamedKeepsItsScheduleDespiteJitter(t *testing.T) {
+	fc := newFakeController(t)
+	pts := streamPoints(64, 8*time.Millisecond) // 504 ms planned
+	for i := range pts {
+		v := 0.0001 * float64(i) // start and end both within the start tolerance
+		pts[i].Positions = []referenceframe.Input{v, v, v, v, v, v}
+	}
+	s, _ := newControllerTestArm(t, fc, restingFrame(inputsToDeg(pts[63].Positions)))
+	if _, err := stream(t, s, pts); err != nil {
+		t.Fatal(err)
+	}
+	cmds, at := fc.received()
+	var first, last time.Time
+	for i, c := range cmds {
+		if strings.HasPrefix(c, "ServoJ") {
+			if first.IsZero() {
+				first = at[i]
+			}
+			last = at[i]
+		}
+	}
+	// 62 intervals between the first and last ServoJ.
+	if got, want := last.Sub(first), 62*8*time.Millisecond; got > want+servoPaceSlack+10*time.Millisecond {
+		t.Errorf("ServoJs spanned %v, want about %v: the schedule is drifting", got, want)
+	}
+}
+
 // Points too far apart for ServoJ must stop the stream, and the arm.
 func TestStreamedRejectsSparsePoints(t *testing.T) {
 	fc := newFakeController(t)

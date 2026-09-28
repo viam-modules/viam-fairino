@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"time"
 
 	"go.viam.com/rdk/ml"
 	"go.viam.com/rdk/referenceframe"
@@ -17,6 +18,15 @@ import (
 // recording the velocity limit it was asked for. Like trajex, it rejects
 // inputs of the wrong dtype.
 func fakeTrajGen(samples [][]float64, gotVel *float64) *inject.MLModelService {
+	times := make([]float64, len(samples))
+	for i := range times {
+		times[i] = 0.008 * float64(i)
+	}
+	return fakeTrajGenTimed(samples, times, gotVel)
+}
+
+// fakeTrajGenTimed is fakeTrajGen with the given sample times (seconds).
+func fakeTrajGenTimed(samples [][]float64, sampleTimes []float64, gotVel *float64) *inject.MLModelService {
 	svc := inject.NewMLModelService("trajex")
 	svc.InferFunc = func(_ context.Context, in ml.Tensors) (ml.Tensors, error) {
 		for name, tn := range in {
@@ -27,10 +37,9 @@ func fakeTrajGen(samples [][]float64, gotVel *float64) *inject.MLModelService {
 		if gotVel != nil {
 			*gotVel = in["velocity_limits_rads_per_sec"].Data().([]float64)[0]
 		}
-		flat, times := []float64{}, []float64{}
-		for i, s := range samples {
+		flat, times := []float64{}, append([]float64(nil), sampleTimes...)
+		for _, s := range samples {
 			flat = append(flat, s...)
-			times = append(times, 0.008*float64(i))
 		}
 		return ml.Tensors{
 			"configurations_rads": tensor.New(tensor.WithShape(len(samples), 6), tensor.WithBacking(flat)),
@@ -138,5 +147,34 @@ func TestValidateTrajGen(t *testing.T) {
 	deps, _, err := (&Config{TrajGen: &TrajGenConfig{Service: "trajex"}}).Validate("path")
 	if err != nil || len(deps) != 1 {
 		t.Errorf("got deps %v, %v; want the ML model service as a dependency", deps, err)
+	}
+}
+
+// trajex puts its last sample (the final waypoint) at the trajectory's exact
+// duration, often a hair after the sample before; ServoJ can't be given an
+// interval that short, so that sample takes the previous one's place.
+func TestGeneratedTrajectoryFoldsACloseFinalSample(t *testing.T) {
+	s, _ := newControllerTestArm(t, newFakeController(t), restingFrame([6]float64{}))
+	s.cfg = &Config{TrajGen: &TrajGenConfig{Service: "trajex"}}
+	step := func(v float64) []float64 { return []float64{v, v, v, v, v, v} }
+	s.trajGen = fakeTrajGenTimed(
+		[][]float64{step(0), step(0.001), step(0.002), step(0.0021)},
+		[]float64{0, 0.008, 0.016, 0.0162}, nil)
+	points, err := s.generateTrajectory(context.Background(), [][]referenceframe.Input{step(0.0021)}, defaultJointSpeedPercent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(points) != 3 {
+		t.Fatalf("got %d points, want 3 (the last folded into the one before)", len(points))
+	}
+	last := points[2]
+	if last.Time != 16200*time.Microsecond || last.Positions[0] != 0.0021 {
+		t.Errorf("last point %v at %v, want the final waypoint at 16.2ms", last.Positions, last.Time)
+	}
+	st := &servoStreamer{s: s}
+	for _, p := range points {
+		if err := st.check(context.Background(), p); err != nil {
+			t.Errorf("folded trajectory fails the stream checks: %v", err)
+		}
 	}
 }

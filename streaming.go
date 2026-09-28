@@ -17,6 +17,20 @@ const (
 	// that would be executed as a jump rather than a trajectory.
 	maxServoIntervalSec = 0.016
 
+	// minServoIntervalSec is the shortest gap between streamed points: the
+	// vendor's minimum ServoJ command cycle (cmdT, 0.001-0.016 s). ServoJ's
+	// cmdT goes out with four decimals, so a shorter gap would reach the
+	// controller out of range, or as 0.
+	minServoIntervalSec = 0.001
+
+	// servoPaceSlack is how late a point may be sent and still count as on
+	// schedule. Timers always wake a little late, and the checks before each
+	// ServoJ take time too; re-anchoring on every such delay would stretch
+	// every interval by it, sending setpoints slower than the cmdT they
+	// carry, so the arm would stop and start at every one. Only lateness
+	// beyond this (a slow client, a stalled connection) moves the schedule.
+	servoPaceSlack = 2 * time.Millisecond
+
 	// streamStartToleranceRad is how far a stream's first point may be from
 	// where the arm actually is, per joint. ServoJ has no approach move of its
 	// own: the first setpoint after it goes out over one interval, so a start
@@ -105,9 +119,11 @@ func (s *viamFairinoFairino) runServoStream(
 // Pacing follows viam-ufactory-xarm's servo-mode streaming: the point after
 // prevTime is sent at anchor+prevTime and told to take the interval to the
 // next. A point that arrives late (a slow client, a stalled command
-// connection) shifts the anchor by its lateness instead of being sent at
-// once, so a backlog is replayed at the planned pace rather than bunched up —
-// which would drive the arm several times faster than the trajectory.
+// connection) shifts the anchor by its lateness beyond servoPaceSlack instead
+// of being sent at once, so a backlog is replayed at the planned pace rather
+// than bunched up — which would drive the arm several times faster than the
+// trajectory. Lateness within the slack leaves the schedule alone, so the
+// next point is sent on time again.
 type servoStreamer struct {
 	s *viamFairinoFairino
 
@@ -147,6 +163,10 @@ func (st *servoStreamer) check(ctx context.Context, p arm.TrajectoryPoint) error
 		return fmt.Errorf("trajectory points are %v apart; ServoJ needs them at most %v apart",
 			p.Time-prevTime, time.Duration(maxServoIntervalSec*float64(time.Second)))
 	}
+	if interval < minServoIntervalSec {
+		return fmt.Errorf("trajectory points are %v apart; ServoJ needs them at least %v apart",
+			p.Time-prevTime, time.Duration(minServoIntervalSec*float64(time.Second)))
+	}
 	if speed := maxJointTravelDeg(st.prevDeg, deg) / interval; speed > maxServoStepSpeedDegsPerSec {
 		return fmt.Errorf("trajectory point at %v needs %.0f°/s, beyond the arm's %v°/s", p.Time, speed, maxJointSpeedDegsPerSec)
 	}
@@ -184,9 +204,9 @@ func (st *servoStreamer) send(ctx context.Context, p arm.TrajectoryPoint) error 
 	switch now := time.Now(); {
 	case st.anchor.IsZero():
 		st.anchor = now.Add(-st.prevTime)
-	case now.After(due):
+	case now.Sub(due) > servoPaceSlack:
 		late := now.Sub(due)
-		st.anchor = st.anchor.Add(late)
+		st.anchor = st.anchor.Add(late - servoPaceSlack)
 		if late > interval {
 			st.s.logger.Warnw("streamed trajectory fell behind; replaying at its planned pace", "late", late, "point_time", p.Time)
 		}
