@@ -88,7 +88,7 @@ type Config struct {
 
 	// SpeedDegsPerSec is the default joint speed in degrees per second, an
 	// alternative to JointSpeedPercent (set at most one). Converted to MoveJ's
-	// percentage against maxJointSpeedDegsPerSec. Range (0, 180].
+	// percentage against maxJointSpeedDegsPerSec. Range [1.8, 180] (1.8 is 1%).
 	SpeedDegsPerSec float64 `json:"speed_degs_per_sec,omitempty"`
 
 	// UseURDF selects the selected model's on-disk URDF as the kinematics
@@ -181,8 +181,9 @@ func (cfg *Config) Validate(path string) ([]string, []string, error) {
 	if v := cfg.JointSpeedPercent; v < 0 || v > 100 {
 		return nil, nil, fmt.Errorf("%s: joint_speed_percent must be between 1 and 100, got %d", path, v)
 	}
-	if v := cfg.SpeedDegsPerSec; v < 0 || v > maxJointSpeedDegsPerSec {
-		return nil, nil, fmt.Errorf("%s: speed_degs_per_sec must be between 0 and %v, got %v", path, maxJointSpeedDegsPerSec, v)
+	if v := cfg.SpeedDegsPerSec; v < 0 || (v > 0 && v < minSpeedDegsPerSec-speedEpsilon) || v > maxJointSpeedDegsPerSec {
+		return nil, nil, fmt.Errorf("%s: speed_degs_per_sec must be between %v and %v, got %v",
+			path, minSpeedDegsPerSec, maxJointSpeedDegsPerSec, v)
 	}
 	if cfg.SpeedDegsPerSec > 0 && cfg.JointSpeedPercent > 0 {
 		return nil, nil, fmt.Errorf("%s: set at most one of speed_degs_per_sec and joint_speed_percent", path)

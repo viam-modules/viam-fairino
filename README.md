@@ -82,7 +82,7 @@ This module provides the following model(s):
 | `model` | string | no | Which robot's kinematics/meshes to load: `"fr5"` (standard FR5) or `"fr5-wml"` (long-reach FR5-WML). Defaults to auto-detection via the controller's `GetSoftwareVersion`, which requires the robot to be reachable at startup. |
 | `tool_num` / `workpiece_num` | int | no | Active tool/workpiece coordinate frame, 0-14 each. Default 0 (no tool, base workpiece). |
 | `joint_speed_percent` | int | no | `MoveJ`'s speed field, 1-100. Default 20 (matches `fairino-python-sdk`'s own `MoveJ` default). |
-| `speed_degs_per_sec` | float | no | Default joint speed in degrees/second, (0, 180]. An alternative to `joint_speed_percent` (set at most one); converted to `MoveJ`'s percentage against the FR5's 180°/s joint maximum. |
+| `speed_degs_per_sec` | float | no | Default joint speed in degrees/second, [1.8, 180] (1.8°/s is `MoveJ`'s 1% minimum). An alternative to `joint_speed_percent` (set at most one); converted to `MoveJ`'s percentage against the FR5's 180°/s joint maximum. |
 | `use_urdf` | bool | no | Use the selected model's on-disk URDF (`arm/fr5.urdf` or `arm/fr5wml.urdf`) as the kinematics source instead of the default embedded JSON. Requires `VIAM_MODULE_ROOT` to be set (true for a normal deployment). JSON is the default because it's the only one the Viam app's joint-limit sliders currently parse correctly. |
 | `mesh_decimation_ratios` | []float | no | Only used when `use_urdf` is true; per-collision-mesh decimation ratios (document order). |
 | `motion` | string | no | Name of the `motion.Service` `MoveToPosition` delegates to. Defaults to this robot's `"builtin"` motion service if available (optional dependency); naming one explicitly makes it a hard dependency instead. See the Cartesian motion section above. |
@@ -184,15 +184,18 @@ data, e-stop, motion-done, and frame diagnostics (`payload_len`,
 `frame_count`). Useful for bring-up and debugging.
 
 `{"command": "set_speed", "speed_degs_per_sec": 45}` changes the default joint
-speed for later moves (until the next reconfigure); `{"command": "get_speed"}`
-returns it.
+speed for later moves (until the next reconfigure), in [1.8, 180];
+`{"command": "get_speed"}` returns it.
 
 ### Per-move speed
 
 A single move can override the default speed, highest precedence last:
 `MoveOptions.MaxVelRads`, then `MoveOptions.MaxVelRadsJoints` (MoveJ takes one
 speed for all joints, so the slowest is used), then `extra` keys `speed_r`
-(rad/s) or `speed_d` (deg/s) — the same keys viam-ufactory-xarm accepts.
+(rad/s) or `speed_d` (deg/s) — the same keys viam-ufactory-xarm accepts. A
+speed above the 180°/s maximum is lowered to it; one below the 1.8°/s minimum
+(`MoveJ`'s 1%) is refused rather than raised, so a move never runs faster than
+asked.
 Acceleration can't be set per move: `MoveJ`'s acceleration field is reserved
 on the controller.
 

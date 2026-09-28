@@ -29,7 +29,8 @@ func TestMoveSpeedPercent(t *testing.T) {
 		"extra speed_d wins":     {opts: &arm.MoveOptions{MaxVelRads: rad(36)}, extra: map[string]interface{}{"speed_d": 144.0}, want: 80},
 		"extra speed_r":          {extra: map[string]interface{}{"speed_r": rad(45)}, want: 25},
 		"clamped to the maximum": {extra: map[string]interface{}{"speed_d": 1000.0}, want: maxSpeedPercent},
-		"clamped to the minimum": {extra: map[string]interface{}{"speed_d": 0.01}, want: minSpeedPercent},
+		"exactly the minimum":    {extra: map[string]interface{}{"speed_d": minSpeedDegsPerSec}, want: minSpeedPercent},
+		"minimum in rad/s":       {extra: map[string]interface{}{"speed_r": rad(minSpeedDegsPerSec)}, want: minSpeedPercent},
 	} {
 		t.Run(name, func(t *testing.T) {
 			cfg := tc.cfg
@@ -39,6 +40,26 @@ func TestMoveSpeedPercent(t *testing.T) {
 				t.Errorf("got %v, %v want %v", got, err, tc.want)
 			}
 		})
+	}
+}
+
+// A move can't go slower than MoveJ's 1%, and must not be quietly sped up to
+// it either.
+func TestMoveSpeedBelowMinimumRejected(t *testing.T) {
+	s, _ := newControllerTestArm(t, newFakeController(t), restingFrame([6]float64{}))
+	for name, tc := range map[string]struct {
+		opts  *arm.MoveOptions
+		extra map[string]interface{}
+	}{
+		"speed_d tiny":     {extra: map[string]interface{}{"speed_d": 0.5}},
+		"speed_d zero":     {extra: map[string]interface{}{"speed_d": 0.0}},
+		"speed_d negative": {extra: map[string]interface{}{"speed_d": -10.0}},
+		"MaxVelRads tiny":  {opts: &arm.MoveOptions{MaxVelRads: rdkutils.DegToRad(1)}},
+		"per-joint tiny":   {opts: &arm.MoveOptions{MaxVelRadsJoints: []float64{1, rdkutils.DegToRad(0.1)}}},
+	} {
+		if pct, err := s.moveSpeedPercent(tc.opts, tc.extra); err == nil {
+			t.Errorf("%s: got %v%%, want an error", name, pct)
+		}
 	}
 }
 
@@ -77,7 +98,7 @@ func TestSetAndGetSpeedDoCommand(t *testing.T) {
 	if got := resp["speed_degs_per_sec"]; got != 45.0 {
 		t.Errorf("get_speed: got %v want 45", got)
 	}
-	for _, bad := range []interface{}{0.0, -5.0, 181.0, "fast", math.NaN(), math.Inf(1)} {
+	for _, bad := range []interface{}{0.0, -5.0, 1.0, 181.0, "fast", math.NaN(), math.Inf(1)} {
 		if _, err := s.DoCommand(context.Background(), map[string]interface{}{"command": "set_speed", "speed_degs_per_sec": bad}); err == nil {
 			t.Errorf("set_speed %v: expected an error", bad)
 		}
@@ -85,7 +106,7 @@ func TestSetAndGetSpeedDoCommand(t *testing.T) {
 }
 
 func TestValidateSpeed(t *testing.T) {
-	for _, cfg := range []Config{{SpeedDegsPerSec: -1}, {SpeedDegsPerSec: 181}, {SpeedDegsPerSec: 30, JointSpeedPercent: 20}} {
+	for _, cfg := range []Config{{SpeedDegsPerSec: -1}, {SpeedDegsPerSec: 0.5}, {SpeedDegsPerSec: 181}, {SpeedDegsPerSec: 30, JointSpeedPercent: 20}} {
 		if _, _, err := cfg.Validate("path"); err == nil {
 			t.Errorf("%+v: expected an error", cfg)
 		}

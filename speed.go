@@ -12,6 +12,15 @@ import (
 const (
 	minSpeedPercent = 1.0
 	maxSpeedPercent = 100.0
+
+	// minSpeedDegsPerSec is minSpeedPercent in degrees per second, the
+	// slowest a move can go. A slower request is refused rather than raised
+	// to it: a move must never run faster than asked.
+	minSpeedDegsPerSec = minSpeedPercent / 100 * maxJointSpeedDegsPerSec
+
+	// speedEpsilon absorbs float rounding in the deg/s <-> percent
+	// conversions, so asking for exactly minSpeedDegsPerSec is allowed.
+	speedEpsilon = 1e-9
 )
 
 func speedPercentFromDegs(degsPerSec float64) float64 {
@@ -44,8 +53,8 @@ func (s *viamFairinoFairino) currentSpeedPercent() float64 {
 
 func (s *viamFairinoFairino) setSpeedDegsPerSec(degsPerSec float64) error {
 	// Written so NaN, which compares false against everything, fails too.
-	if !(degsPerSec > 0 && degsPerSec <= maxJointSpeedDegsPerSec) {
-		return fmt.Errorf("speed must be in (0, %v] degrees per second, got %v", maxJointSpeedDegsPerSec, degsPerSec)
+	if !(degsPerSec >= minSpeedDegsPerSec-speedEpsilon && degsPerSec <= maxJointSpeedDegsPerSec) {
+		return fmt.Errorf("speed must be in [%v, %v] degrees per second, got %v", minSpeedDegsPerSec, maxJointSpeedDegsPerSec, degsPerSec)
 	}
 	s.speedMu.Lock()
 	defer s.speedMu.Unlock()
@@ -58,7 +67,10 @@ func (s *viamFairinoFairino) setSpeedDegsPerSec(degsPerSec float64) error {
 // MoveOptions first, then extra's speed_r/speed_d. MoveJ takes a single speed
 // for all joints, so per-joint limits are honored by moving at the slowest.
 // A NaN or infinite speed is an error: NaN would slip past the clamp below
-// and reach the controller as the literal text "NaN".
+// and reach the controller as the literal text "NaN". So is one below
+// minSpeedDegsPerSec (including speed_d/speed_r <= 0), which MoveJ can't go:
+// raising it would move faster than asked. One above the maximum is lowered
+// to it, which only ever moves slower.
 func (s *viamFairinoFairino) moveSpeedPercent(opts *arm.MoveOptions, extra map[string]interface{}) (float64, error) {
 	pct := s.currentSpeedPercent()
 	if opts != nil {
@@ -95,9 +107,11 @@ func (s *viamFairinoFairino) moveSpeedPercent(opts *arm.MoveOptions, extra map[s
 	}
 
 	switch {
+	case pct < minSpeedPercent-speedEpsilon:
+		return 0, fmt.Errorf("requested joint speed %.3g°/s is below the arm's minimum of %v°/s",
+			speedDegsFromPercent(pct), minSpeedDegsPerSec)
 	case pct < minSpeedPercent:
-		s.logger.Warnf("requested joint speed %.2f%% is below the minimum, using %.0f%%", pct, minSpeedPercent)
-		return minSpeedPercent, nil
+		return minSpeedPercent, nil // rounding only
 	case pct > maxSpeedPercent:
 		s.logger.Warnf("requested joint speed %.2f%% exceeds the maximum, using %.0f%%", pct, maxSpeedPercent)
 		return maxSpeedPercent, nil
