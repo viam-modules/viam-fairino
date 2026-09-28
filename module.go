@@ -631,11 +631,18 @@ completed:
 		if fr.EmergencyStop {
 			return errors.New("Fairino controller e-stopped during motion")
 		}
-		if fr.ErrorCode != 0 {
+		if fr.ErrorCode != 0 && !isWarningCode(fr.ErrorCode) {
 			return fmt.Errorf("Fairino controller reported a fault during motion: %s", faultCodeString(fr.ErrorCode))
 		}
 		if fr.MotionDone {
 			if jointsCloseDeg(fr.JointDegs, targetDeg, jointToleranceDeg) {
+				if fr.ErrorCode != 0 {
+					// A warning (e.g. joint configuration warning) doesn't stop
+					// the controller; the joints reached the target, so the move
+					// succeeded. Surface it without failing the call.
+					s.logger.Warnw("Fairino controller raised a warning during motion; move completed",
+						"warning", faultCodeString(fr.ErrorCode), "joint_deg", fr.JointDegs)
+				}
 				s.logger.Debugw("waitForMotionComplete: motion complete, joints within tolerance", "elapsed", time.Since(pollStart), "joint_deg", fr.JointDegs)
 				return nil
 			}
