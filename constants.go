@@ -337,6 +337,21 @@ const (
 	// error" response — not specific to MoveJ. See scriptErrorFromData in
 	// command.go, which extracts the embedded errcode.
 	cmdIDScriptError = 500
+
+	// cmdIDDragTeachSwitch is NOT documented anywhere in the manual either —
+	// found by sniffing the WebApp UI's own HTTPS traffic while toggling its
+	// "draggable" switch: it POSTs
+	// {"cmd": 333, "data": {"content": "DragTeachSwitch(1)"}}, which is
+	// structurally identical to this module's own ASCII frames (a numeric
+	// command ID paired with a literal function-call string). Confirmed
+	// against a live (simulated) controller: sending CMD_ID 333 with DATA
+	// "DragTeachSwitch(1)"/"DragTeachSwitch(0)" over this same TCP port flips
+	// robot_mode/program_state to "drag" on the status port exactly like the
+	// UI toggle does, with no other prerequisite — unlike the manual's own
+	// SetDragMode3Param (§7.2.31), whose own description says "drag teaching
+	// function" but which demands a joint-torque-sensor calibration this
+	// robot doesn't have (errcode 197) and never actually flips robot_mode.
+	cmdIDDragTeachSwitch = 333
 )
 
 // cmdErrorNames is the full controller error-code table from manual chapter
