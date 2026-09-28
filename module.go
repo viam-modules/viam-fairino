@@ -342,10 +342,14 @@ func NewFairino(ctx context.Context, deps resource.Dependencies, name resource.N
 
 	cmd := acquireCommandClient(host, commandPort, logger)
 	// Release the shared command client if construction fails before the
-	// resource takes ownership (its Close is what releases it thereafter).
+	// resource takes ownership (its Close is what releases it thereafter),
+	// along with any setup command registered on it (collision levels), which
+	// would otherwise be replayed on every reconnect for a resource that
+	// doesn't exist.
 	cmdOwned := false
 	defer func() {
 		if !cmdOwned {
+			cmd.dropSetup(name.String())
 			releaseCommandClient(host, commandPort)
 		}
 	}()
