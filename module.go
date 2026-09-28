@@ -574,6 +574,11 @@ func (s *viamFairinoFairino) checkReadyToMove(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	// A feed that is connected but has stopped sending leaves an old frame
+	// behind, which can't vouch for the controller's state now.
+	if age := time.Since(fr.ReceivedAt); age > statusFeedLostTimeout {
+		return fmt.Errorf("status stream stalled: no new frame for %v; not moving", age.Round(time.Millisecond))
+	}
 	if fr.EmergencyStop {
 		return errors.New("Fairino controller is e-stopped: release the emergency stop before moving")
 	}

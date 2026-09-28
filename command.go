@@ -58,8 +58,11 @@ const (
 	cmdReadTimeout = 10 * time.Second
 
 	// stopTimeout bounds a STOP, which runs on a deadline of its own: the
-	// caller's context is often the very one being cancelled.
-	stopTimeout = 5 * time.Second
+	// caller's context is often the very one being cancelled. It includes the
+	// wait for the connection, which the command already on the wire can hold
+	// for up to cmdReadTimeout, so it must outlast that with room left for the
+	// STOP's own round trip.
+	stopTimeout = cmdReadTimeout + 5*time.Second
 
 	// cmdMaxFrameLen caps how much we'll buffer in readFrame while scanning
 	// for a "/b/f" terminator that never arrives (corrupt stream, wrong
@@ -81,6 +84,7 @@ type commandClient struct {
 	connMu sync.RWMutex
 	conn   net.Conn
 	reader *bufio.Reader
+	closed bool // set by shutdown; a closed client never dials again
 
 	cnt atomic.Uint32 // rolling request id; wraps harmlessly
 }
@@ -215,14 +219,24 @@ func releaseCommandClient(host string, port int) {
 	delete(sharedCommandClients, key)
 	sharedCommandMu.Unlock()
 
-	_ = e.client.close()
+	_ = e.client.shutdown()
 }
+
+// errCommandClientClosed is returned by a command sent on a client that its
+// last user has released.
+var errCommandClientClosed = errors.New("command client is closed")
 
 // connect opens (or reopens) the TCP connection to the command port.
 func (c *commandClient) connect(ctx context.Context) error {
 	c.connMu.Lock()
 	defer c.connMu.Unlock()
 
+	// A call still holding a released client (one that outlived its
+	// resource's Close) must not reopen a connection nothing would close: the
+	// controller accepts only a few.
+	if c.closed {
+		return errCommandClientClosed
+	}
 	c.logger.Debugw("command port: dialing", "host", c.host, "port", c.port)
 
 	if c.conn != nil {
@@ -241,6 +255,15 @@ func (c *commandClient) connect(ctx context.Context) error {
 	return nil
 }
 
+// shutdown closes the connection for good; see connect.
+func (c *commandClient) shutdown() error {
+	c.connMu.Lock()
+	c.closed = true
+	c.connMu.Unlock()
+	return c.close()
+}
+
+// close drops the current connection; the next command reconnects.
 func (c *commandClient) close() error {
 	c.connMu.Lock()
 	defer c.connMu.Unlock()

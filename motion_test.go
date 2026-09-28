@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"go.viam.com/rdk/logging"
 	"go.viam.com/rdk/referenceframe"
 	rdkutils "go.viam.com/rdk/utils"
 )
@@ -418,5 +419,48 @@ func TestMoveStopsWhenStatusFeedFreezes(t *testing.T) {
 	}
 	if fc.count("STOP") != 1 {
 		t.Errorf("arm not stopped: %v", fc.sent())
+	}
+}
+
+// A frame the feed stopped refreshing can't vouch that the controller is
+// healthy now, so no move starts on it.
+func TestMoveRefusedOnStaleStatus(t *testing.T) {
+	fc := newFakeController(t)
+	s, sc := newControllerTestArm(t, fc, restingFrame([6]float64{}))
+	sc.mu.Lock()
+	sc.frame.ReceivedAt = time.Now().Add(-2 * statusFeedLostTimeout)
+	sc.mu.Unlock()
+	err := s.MoveToJointPositions(context.Background(), testTarget(), nil)
+	if err == nil || !strings.Contains(err.Error(), "status stream stalled") {
+		t.Errorf("got %v, want a stalled-stream error", err)
+	}
+	if fc.count("MoveJ") != 0 {
+		t.Errorf("MoveJ sent on a stale frame: %v", fc.sent())
+	}
+}
+
+// A call that outlives the last release of a shared command client must not
+// dial a connection nothing will ever close.
+func TestReleasedCommandClientNeverRedials(t *testing.T) {
+	fc := newFakeController(t)
+	logger := logging.NewTestLogger(t)
+	cmd := acquireCommandClient("127.0.0.1", fc.port(), logger)
+	if err := cmd.sendAck(context.Background(), cmdIDStop, "STOP"); err != nil {
+		t.Fatal(err)
+	}
+	releaseCommandClient("127.0.0.1", fc.port())
+	if err := cmd.sendAck(context.Background(), cmdIDStop, "STOP"); !errors.Is(err, errCommandClientClosed) {
+		t.Errorf("got %v, want errCommandClientClosed", err)
+	}
+	if n := fc.count("STOP"); n != 1 {
+		t.Errorf("controller got %d STOPs, want 1", n)
+	}
+}
+
+// A STOP may queue behind a command that holds the connection for its whole
+// ack wait, and must still have time for its own round trip after that.
+func TestStopTimeoutOutlastsACommandAckWait(t *testing.T) {
+	if stopTimeout <= cmdReadTimeout {
+		t.Errorf("stopTimeout %v must exceed cmdReadTimeout %v", stopTimeout, cmdReadTimeout)
 	}
 }
