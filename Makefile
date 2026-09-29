@@ -23,12 +23,12 @@ test:
 	go test ./...
 
 FIRST_RUN := $(shell jq -r '.first_run // empty' meta.json 2>/dev/null)
-TAR_FILES := meta.json $(MODULE_BINARY) arm/fr5wml.urdf arm/meshes
+TAR_FILES := meta.json $(MODULE_BINARY) arm/fr5.urdf arm/fr5wml.urdf arm/meshes
 ifneq ($(FIRST_RUN),)
 TAR_FILES += $(FIRST_RUN)
 endif
 
-module.tar.gz: meta.json $(MODULE_BINARY) arm/fr5wml.urdf
+module.tar.gz: meta.json $(MODULE_BINARY) arm/fr5.urdf arm/fr5wml.urdf
 ifneq ($(VIAM_TARGET_OS), windows)
 	strip $(MODULE_BINARY)
 endif
