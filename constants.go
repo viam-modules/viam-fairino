@@ -161,6 +161,15 @@ var faultCodeNames = map[uint8]string{
 	12: "joint configuration warning",
 }
 
+// warningCodes are error_code values the controller raises without stopping
+// motion. waitForMotionComplete doesn't fail a move on these; a move that
+// reaches its target despite one still succeeds.
+var warningCodes = map[uint8]bool{
+	12: true, // joint configuration warning
+}
+
+func isWarningCode(v uint8) bool { return warningCodes[v] }
+
 func programStateString(v uint8) string {
 	if s, ok := programStateNames[v]; ok {
 		return s
