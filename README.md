@@ -40,6 +40,25 @@ system`. This is a robot-config change, not something the module supplies on
 its own — `MoveToJointPositions`/`MoveThroughJointPositions`/`GoToInputs`
 don't need it, only `MoveToPosition`.
 
+## Tool frame (`tool_num`)
+
+`GetForwardKin` — which the module uses to compute `MoveJ`'s required
+`desc_pos` field from a joint target (see `moveJParams.Pose`'s doc comment)
+— takes no tool-number argument of its own: it always returns the pose in
+whatever tool coordinate frame is **currently active on the controller**,
+regardless of what any individual command says. If `tool_num` were a fixed
+config value and someone switched the controller's active tool from the
+pendant or WebApp (teaching a new tool, jogging in a different frame, etc.),
+every subsequent `MoveJ` would send a `toolNum` field that no longer matches
+the frame `GetForwardKin` actually used — the controller rejects this
+(confirmed on hardware: errcode 14, "the instruction execution failed").
+
+So, when `tool_num` is left unset, the module reads the controller's live
+active tool from the status feed for every move instead of assuming a fixed
+value, and self-corrects if it changes. Set `tool_num` explicitly only if
+you need to pin a specific tool and are sure nothing else (pendant, WebApp,
+another client) will change the controller's active tool out from under it.
+
 ## Waypoint blending (`blend_time_ms`)
 
 By default, a multi-waypoint move (`MoveThroughJointPositions`, and
@@ -80,7 +99,8 @@ This module provides the following model(s):
 |---|---|---|---|
 | `host` | string | no | Controller IP address. Defaults to `192.168.58.2` (the Fairino factory default). |
 | `model` | string | no | Which robot's kinematics/meshes to load: `"fr5"` (standard FR5) or `"fr5-wml"` (long-reach FR5-WML). Defaults to auto-detection via the controller's `GetSoftwareVersion`, which requires the robot to be reachable at startup. |
-| `tool_num` / `workpiece_num` | int | no | Active tool/workpiece coordinate frame, 0-14 each. Default 0 (no tool, base workpiece). |
+| `tool_num` | int | no | Tool coordinate frame, 0-14, used for `MoveJ`'s toolNum field. Defaults to whatever tool is **currently active on the controller** (read live from the status feed) rather than a fixed value — see "Tool frame" below for why. |
+| `workpiece_num` | int | no | Workpiece coordinate frame, 0-14, used for `MoveJ`'s workPieceNum field. Default 0 (base workpiece). |
 | `joint_speed_percent` | int | no | `MoveJ`'s speed field, 1-100. Default 20 (matches `fairino-python-sdk`'s own `MoveJ` default). |
 | `use_urdf` | bool | no | Use the selected model's on-disk URDF (`arm/fr5.urdf` or `arm/fr5wml.urdf`) as the kinematics source instead of the default embedded JSON. Requires `VIAM_MODULE_ROOT` to be set (true for a normal deployment). JSON is the default because it's the only one the Viam app's joint-limit sliders currently parse correctly. |
 | `mesh_decimation_ratios` | []float | no | Only used when `use_urdf` is true; per-collision-mesh decimation ratios (document order). |

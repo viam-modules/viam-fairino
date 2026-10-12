@@ -72,11 +72,29 @@ type Config struct {
 	// unreachable. Validated against modelRegistry when non-empty.
 	Model string `json:"model,omitempty"`
 
-	// ToolNum and WorkpieceNum select the active tool/workpiece coordinate
-	// frame (manual: 0-14 each) used for MoveJ's toolNum/workPieceNum
-	// fields. Default 0 (no tool, base workpiece) for both — since that's
-	// also the zero value, there's no separate "unset" sentinel needed.
-	ToolNum      int `json:"tool_num,omitempty"`
+	// ToolNum selects the tool coordinate frame (manual: 0-14) used for
+	// MoveJ's toolNum field. A pointer so "unset" is distinguishable from
+	// "explicitly 0": when nil, every move resolves it to whatever tool is
+	// *currently active on the controller* (the status feed's live tool_num,
+	// see resolveToolNum) instead of assuming 0. This matters because
+	// GetForwardKin (used to fill MoveJ's desc_pos) takes no tool-number
+	// argument of its own — it always returns the pose in whatever tool
+	// frame is active on the controller, independent of this config. Sending
+	// a MoveJ whose own toolNum field names a different tool than
+	// GetForwardKin actually used is rejected by the controller (confirmed
+	// on hardware: errcode 14, "the instruction execution failed", when the
+	// controller's active tool had been changed from the pendant/WebApp to
+	// something other than this config's old hardcoded 0 default). Set this
+	// explicitly to pin a specific tool regardless of what the pendant has
+	// active.
+	ToolNum *int `json:"tool_num,omitempty"`
+
+	// WorkpieceNum selects the workpiece coordinate frame (manual: 0-14)
+	// used for MoveJ's workPieceNum field. Default 0 (base workpiece) —
+	// since that's also the zero value, there's no separate "unset"
+	// sentinel needed (unlike ToolNum above, nothing analogous to
+	// GetForwardKin's active-tool dependency applies to the workpiece
+	// frame).
 	WorkpieceNum int `json:"workpiece_num,omitempty"`
 
 	// JointSpeedPercent is the MoveJ "speed" field (manual: 1-100). Zero
@@ -134,13 +152,15 @@ func (cfg *Config) Validate(path string) ([]string, []string, error) {
 			return nil, nil, fmt.Errorf("%s: unsupported model %q; supported models: %s", path, cfg.Model, supportedModels())
 		}
 	}
-	for name, v := range map[string]int{
-		"tool_num":      cfg.ToolNum,
-		"workpiece_num": cfg.WorkpieceNum,
-	} {
-		if v < 0 || v > 14 {
-			return nil, nil, fmt.Errorf("%s: %s must be between 0 and 14, got %d", path, name, v)
+	// ToolNum is a pointer (nil = "unset", see its doc comment); only
+	// validate it when the caller actually set one.
+	if cfg.ToolNum != nil {
+		if v := *cfg.ToolNum; v < 0 || v > 14 {
+			return nil, nil, fmt.Errorf("%s: tool_num must be between 0 and 14, got %d", path, v)
 		}
+	}
+	if v := cfg.WorkpieceNum; v < 0 || v > 14 {
+		return nil, nil, fmt.Errorf("%s: workpiece_num must be between 0 and 14, got %d", path, v)
 	}
 	if v := cfg.JointSpeedPercent; v < 0 || v > 100 {
 		return nil, nil, fmt.Errorf("%s: joint_speed_percent must be between 1 and 100, got %d", path, v)
@@ -336,6 +356,22 @@ func (s *viamFairinoFairino) latestFrame(ctx context.Context) (statusFrame, erro
 		return fr, nil
 	}
 	return s.status.waitForFrame(ctx)
+}
+
+// resolveToolNum returns the tool frame index to send as a MoveJ/MoveL
+// toolNum field: Config.ToolNum when explicitly set, otherwise the
+// controller's own live active-tool index from the status feed
+// (fr.ToolNum). See Config.ToolNum's doc comment for why the unset case
+// can't just default to a fixed value like 0.
+func (s *viamFairinoFairino) resolveToolNum(ctx context.Context) (int, error) {
+	if s.cfg.ToolNum != nil {
+		return *s.cfg.ToolNum, nil
+	}
+	fr, err := s.latestFrame(ctx)
+	if err != nil {
+		return 0, fmt.Errorf("tool_num not set in config; reading the controller's active tool from the status feed: %w", err)
+	}
+	return int(fr.ToolNum), nil
 }
 
 // JointPositions returns the current joint positions of the arm.
@@ -557,10 +593,15 @@ func (s *viamFairinoFairino) moveToJointPositionsOnce(ctx context.Context, posit
 	}
 	s.logger.Debugw("moveToJointPositionsOnce: forward kinematics for target", "target_deg", targetDeg, "target_pose", targetPose)
 
+	toolNum, err := s.resolveToolNum(ctx)
+	if err != nil {
+		return fmt.Errorf("resolving tool frame for MoveJ: %w", err)
+	}
+
 	params := moveJParams{
 		Joints:       targetDeg,
 		Pose:         targetPose,
-		ToolNum:      s.cfg.ToolNum,
+		ToolNum:      toolNum,
 		WorkPieceNum: s.cfg.WorkpieceNum,
 		SpeedPercent: float64(orDefaultInt(s.cfg.JointSpeedPercent, defaultJointSpeedPercent)),
 		AccelPercent: 0, // reserved/non-functional on the controller — see moveJParams.AccelPercent
