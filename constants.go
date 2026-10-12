@@ -305,8 +305,14 @@ const (
 // Command numbers (CMD_ID) this module sends.
 const (
 	cmdIDMoveJ         = 201 // manual §2.1, Table 2-1
+	cmdIDMoveL         = 203 // manual §2.3, Table 2-6
 	cmdIDStop          = 102 // manual §2.35, Table 2-48
 	cmdIDGetForwardKin = 377 // manual §6.3.24, Table 6-3-24
+
+	// Tool-coordinate-frame commands used by rotateAroundEdge (MoveL with a
+	// tool-frame rotational offset, manual Table 2-6's offset_flag=2).
+	cmdIDSetToolCoord       = 316  // manual §5.3.1, Table 5-3-1
+	cmdIDGetToolCoordWithID = 1261 // manual §6.2.7, Table 6-2-7
 
 	// Gripper commands, manual chapter 7.1 ("Robot peripheral instructions").
 	cmdIDSetGripperConfig = 226 // §7.1.1, Table 7-1-1

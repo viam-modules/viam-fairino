@@ -165,7 +165,7 @@ go run ./cmd/fairino-test -host <ip> gripper open|close|move <0-100>
 | `JointPositions` / `CurrentInputs` | ✅ live from the 8083 status stream |
 | `IsMoving` | ✅ from `robot_motion_done` (may not register pendant/drag motion yet) |
 | `Status` | ✅ connection health + decoded controller state |
-| `DoCommand` | ✅ `{"command": "status"}`, `"enter_drag_mode"`, `"exit_drag_mode"` (see below) |
+| `DoCommand` | ✅ `{"command": "status"}`, `"enter_drag_mode"`, `"exit_drag_mode"`, `"rotate_around_edge"` (see below) |
 | `MoveToJointPositions` | ✅ single blocking `MoveJ` |
 | `MoveThroughJointPositions` | ✅ loops `MoveToJointPositions`' underlying mechanics per waypoint; blends through intermediate waypoints when `blend_time_ms` is set (see below) |
 | `MoveToPosition` | ✅ via a `motion.Service` (see the "frame" config requirement above) — IK-solved, self-collision-checked joint trajectory, never a direct Cartesian command to the controller |
@@ -188,6 +188,32 @@ data, e-stop, motion-done, and frame diagnostics (`payload_len`,
 
 `{"command": "enter_drag_mode"}` / `{"command": "exit_drag_mode"}` toggle the
 controller's drag-teach (free-drive) mode. This uses an undocumented command
+
+`{"command": "rotate_around_edge", "degrees": <float>, "axis": "x"|"y"|"z" (optional, default "x"), "speed": <float, optional, default 100>}`
+rotates the TCP in place around the origin of the currently-active tool
+coordinate frame (see "Tool frame" above) via a `MoveL` whose target pose
+matches the arm's current pose, offset only by a tool-frame rotation
+(manual §2.3, `offset_flag=2`) — so the tool's TCP origin stays fixed while
+the arm reorients around it. `axis` selects which of the tool frame's own
+rotational axes `degrees` is applied around.
+
+**This requires the active tool frame to actually be calibrated to a real
+pivot point** (e.g. a contact edge taught in the Fairino app) — rotating
+around an uncalibrated (all-zero) tool frame is a no-op pivot point and just
+spins the arm around its flange. The call warns (but doesn't fail) if the
+resolved tool's calibration reads back as all zero.
+
+Returns `{"axis": ..., "tcp_pose_before": [...], "tcp_pose_after": [...]}`
+(both from the status feed's `tl_cur_pos`) so a near-zero position delta
+between them can confirm the pivot point actually held still.
+
+**This call blocks for the whole physical rotation**, not just an ack: this
+controller's `MoveL` doesn't return its response frame until the motion
+segment itself completes (unlike `MoveJ`, whose ack just means "queued").
+Because the command port connection is shared with the gripper (see
+"Gripper methods" below), a `rotate_around_edge` call holds that shared
+connection for the whole rotation — same tradeoff this module already
+accepts for a blocking `MoveGripper`.
 
 ## Gripper methods
 

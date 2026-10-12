@@ -432,11 +432,14 @@ func (s *viamFairinoFairino) Status(ctx context.Context) (map[string]interface{}
 }
 
 // DoCommand exposes the full decoded status for bring-up and debugging, plus
-// drag-teach (free-drive) mode control:
+// drag-teach (free-drive) mode control and the edge-rotation primitive:
 //
 //	{"command": "status"} → every Phase 1 field plus payload diagnostics.
 //	{"command": "enter_drag_mode"} → DragTeachSwitch(1)
-//	{"command": "exit_drag_mode"} → DragTeachSwitch(0).
+//	{"command": "exit_drag_mode"} → DragTeachSwitch(0)
+//	{"command": "rotate_around_edge", "degrees": <float>, "axis": "x"|"y"|"z" (optional, default "x"), "speed": <float> (optional, default 100)}
+//	  → rotates the TCP in place around the currently-active tool frame's
+//	    origin; see rotateAroundEdge's doc comment.
 func (s *viamFairinoFairino) DoCommand(ctx context.Context, cmd map[string]interface{}) (map[string]interface{}, error) {
 	command, _ := cmd["command"].(string)
 	switch command {
@@ -456,8 +459,40 @@ func (s *viamFairinoFairino) DoCommand(ctx context.Context, cmd map[string]inter
 			return nil, err
 		}
 		return map[string]interface{}{"ok": true}, nil
+	case "rotate_around_edge":
+		degrees, ok := floatFromCmd(cmd, "degrees")
+		if !ok {
+			return nil, errors.New(`rotate_around_edge: missing required numeric "degrees"`)
+		}
+		speed, ok := floatFromCmd(cmd, "speed")
+		if !ok {
+			speed = 100 // matches the original script's own --speed default
+		}
+		if speed <= 0 || speed > 100 {
+			return nil, fmt.Errorf("rotate_around_edge: speed must be between 0 and 100, got %v", speed)
+		}
+		axis, _ := cmd["axis"].(string)
+		if axis == "" {
+			axis = "x" // the original script's only validated axis
+		}
+		return s.rotateAroundEdge(ctx, axis, degrees, speed)
 	default:
-		return nil, fmt.Errorf("unknown command %q (supported: \"status\", \"enter_drag_mode\", \"exit_drag_mode\")", command)
+		return nil, fmt.Errorf("unknown command %q (supported: \"status\", \"enter_drag_mode\", \"exit_drag_mode\", \"rotate_around_edge\")", command)
+	}
+}
+
+// floatFromCmd reads a numeric DoCommand parameter, returning (0, false) when
+// it's absent or not a number. Unlike gripper.go's intFromCmd, this returns
+// a presence bool instead of treating 0 as "absent" — 0 is a legitimate
+// "degrees" value (e.g. a no-op rotation), so it can't double as a sentinel.
+func floatFromCmd(cmd map[string]any, key string) (float64, bool) {
+	switch v := cmd[key].(type) {
+	case float64: // JSON numbers arrive as float64
+		return v, true
+	case int:
+		return float64(v), true
+	default:
+		return 0, false
 	}
 }
 
@@ -702,6 +737,153 @@ completed:
 			}
 			s.logger.Debugw("waitForMotionComplete: motion done but joints out of tolerance", "elapsed", time.Since(pollStart), "joint_deg", fr.JointDegs, "target_deg", targetDeg)
 			return fmt.Errorf("motion completed but joints did not reach target (got %v want %v degrees)", fr.JointDegs, targetDeg)
+		}
+	}
+}
+
+// moveLAckTimeout bounds the MoveL ack wait when the caller's context
+// carries no deadline. Generous on purpose: unlike MoveJ, MoveL's ack was
+// found not to return until the physical motion segment completes (see
+// moveL's doc comment in command.go) — same reasoning gripper.go's
+// moveGripperOnce uses for MoveGripper's comparably blocking ack, just with
+// a fixed bound here instead of one derived from a configured max-time,
+// since there's no equivalent config field for a rotation's expected
+// duration.
+const moveLAckTimeout = 60 * time.Second
+
+// cartesianMotionDoneTimeout bounds rotateAroundEdge's defensive post-MoveL
+// motion-done poll — short, because by the time MoveL's own ack returns the
+// move should already be physically complete (see moveL's doc comment);
+// this just catches the case where that isn't true.
+const cartesianMotionDoneTimeout = 5 * time.Second
+
+// rotateAroundEdge rotates the arm's tool-center-point in place around the
+// origin of its currently-active tool coordinate frame — ported from a
+// validated standalone test script that found a MoveL() (manual §2.3) whose
+// target pose exactly matches the arm's current pose, offset only by a
+// tool-coordinate-frame rotation (offset_flag=2), holds the tool's TCP
+// origin fixed while the arm reorients around it. If the active tool frame
+// is calibrated to a real contact point (e.g. a taught edge), this is a
+// pure pivot about that point — one controller-native command instead of a
+// hand-taught multi-waypoint joint-space arc.
+//
+// axis selects which of the tool frame's rotational axes degrees applies to
+// ("x", "y", or "z", case-insensitive — see axisOffset in command.go).
+// speedPercent is MoveL's speed/acc, 0-100 (DoCommand, the only caller,
+// already range-checks it). Returns tcp_pose_before/after (from the status
+// feed) for the same before/after drift visibility the original script
+// printed.
+func (s *viamFairinoFairino) rotateAroundEdge(ctx context.Context, axis string, degrees, speedPercent float64) (map[string]interface{}, error) {
+	before, err := s.latestFrame(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("reading current state: %w", err)
+	}
+
+	toolNum, err := s.resolveToolNum(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("resolving tool frame: %w", err)
+	}
+
+	toolCoord, err := s.cmd.getToolCoordWithID(ctx, toolNum)
+	if err != nil {
+		return nil, fmt.Errorf("GetToolCoordWithID(%d): %w", toolNum, err)
+	}
+	if toolCoord == ([6]float64{}) {
+		s.logger.CWarnw(ctx, "rotate_around_edge: tool coordinate frame looks unconfigured (all zero) — meaningless without a real edge-offset TCP", "tool_num", toolNum)
+	}
+
+	// Re-applies the tool's own already-read-back calibration to make it the
+	// controller's active tool — doesn't redefine it, just reactivates it
+	// (see setToolCoord's doc comment in command.go).
+	if err := s.cmd.setToolCoord(ctx, toolNum, toolCoord, 0, 0, 0); err != nil {
+		return nil, fmt.Errorf("SetToolCoord(%d): %w", toolNum, err)
+	}
+
+	dtRx, dtRy, dtRz, err := axisOffset(axis, degrees)
+	if err != nil {
+		return nil, fmt.Errorf("rotate_around_edge: %w", err)
+	}
+
+	params := moveLParams{
+		Joints:       before.JointDegs,
+		Pose:         before.TCPPose,
+		ToolNum:      toolNum,
+		WorkPieceNum: 0,
+		SpeedPercent: speedPercent,
+		AccelPercent: speedPercent,
+		OverridePct:  100,
+		BlendR:       -1, // block: stop here, no multi-waypoint blending
+		OffsetFlag:   2,  // tool coordinate system
+		Offset:       [6]float64{0, 0, 0, dtRx, dtRy, dtRz},
+		OAcc:         speedPercent,
+		// VelAccMode 0 (percentage): with ~zero translation (target == current
+		// pose), speed/acc are the only meaningful lever for the rotation's
+		// pace — see moveLParams.VelAccMode's doc comment.
+		VelAccMode: 0,
+	}
+
+	moveCtx := ctx
+	if _, ok := ctx.Deadline(); !ok {
+		var cancel context.CancelFunc
+		moveCtx, cancel = context.WithTimeout(ctx, moveLAckTimeout)
+		defer cancel()
+	}
+	if err := s.cmd.moveL(moveCtx, params); err != nil {
+		return nil, fmt.Errorf("MoveL: %w", err)
+	}
+
+	if err := s.waitForCartesianMotionDone(ctx); err != nil {
+		return nil, err
+	}
+
+	after, err := s.latestFrame(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("reading state after motion: %w", err)
+	}
+
+	return map[string]interface{}{
+		"axis":            strings.ToLower(axis),
+		"tcp_pose_before": floatSlice(before.TCPPose[:]),
+		"tcp_pose_after":  floatSlice(after.TCPPose[:]),
+	}, nil
+}
+
+// waitForCartesianMotionDone is rotateAroundEdge's defensive post-MoveL
+// completion check. By the time MoveL's own ack returns, the physical move
+// should already be done (see moveL's doc comment) — this is a short,
+// best-effort poll, not the primary completion signal waitForMotionComplete
+// is for joint moves. Deliberately not shared with that function: there's
+// no discrete joint target to verify a Cartesian offset move against (only
+// MotionDone itself), so waitForMotionComplete's jointsCloseDeg check
+// doesn't apply here. On timeout, this logs a warning and returns nil (not
+// an error) — matching the original script, which trusted MoveL's own
+// blocking ack and only printed a warning on a motion-done timeout.
+func (s *viamFairinoFairino) waitForCartesianMotionDone(ctx context.Context) error {
+	deadline := time.Now().Add(cartesianMotionDoneTimeout)
+	for {
+		fr, ok, _ := s.status.latest()
+		if ok {
+			if fr.EmergencyStop {
+				return errors.New("Fairino controller e-stopped during motion")
+			}
+			if fr.ErrorCode != 0 && !isWarningCode(fr.ErrorCode) {
+				return fmt.Errorf("Fairino controller reported a fault during motion: %s", faultCodeString(fr.ErrorCode))
+			}
+			if fr.MotionDone {
+				return nil
+			}
+		}
+		if time.Now().After(deadline) {
+			s.logger.CWarnw(ctx, "rotate_around_edge: timed out waiting for motion_done; MoveL's own ack already returned, proceeding", "timeout", cartesianMotionDoneTimeout)
+			return nil
+		}
+		select {
+		case <-ctx.Done():
+			stopCtx, cancelStop := context.WithTimeout(context.Background(), 2*time.Second)
+			_ = s.cmd.stop(stopCtx)
+			cancelStop()
+			return ctx.Err()
+		case <-time.After(motionPollInterval):
 		}
 	}
 }

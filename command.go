@@ -545,6 +545,171 @@ func parsePose6(data string) ([6]float64, error) {
 	return pose, nil
 }
 
+// getToolCoordWithID sends GetToolCoordWithID(toolNum) (manual §6.2.7, CMD_ID
+// 1261), returning that tool's calibrated (x,y,z,rx,ry,rz). Like
+// GetForwardKin, the response has no wrapping errcode — Table 6-2-7 lists the
+// six values directly — so this reuses parsePose6.
+//
+// rotateAroundEdge uses this to read a tool's own calibration back before
+// reapplying it via setToolCoord to make it the controller's active tool
+// (see setToolCoord's doc comment for why that reapply step is needed).
+func (c *commandClient) getToolCoordWithID(ctx context.Context, toolNum int) ([6]float64, error) {
+	data := fmt.Sprintf("GetToolCoordWithID(%d)", toolNum)
+	c.logger.Debugw("getToolCoordWithID: request", "tool_num", toolNum)
+	resp, err := c.send(ctx, cmdIDGetToolCoordWithID, data)
+	if err != nil {
+		c.logger.Debugw("getToolCoordWithID: send failed", "err", err)
+		return [6]float64{}, err
+	}
+	coord, err := parsePose6(resp)
+	c.logger.Debugw("getToolCoordWithID: result", "resp", resp, "coord", coord, "err", err)
+	return coord, err
+}
+
+// setToolCoord sends SetToolCoord() (manual §5.3.1, CMD_ID 316), which both
+// sets a tool coordinate system's calibration and makes it the controller's
+// active tool. toolID mirrors the script this was ported from (test_fairino_
+// movel.py's set_tool_coord): it reuses toolNum rather than taking a separate
+// item-number argument, since every known caller only ever wants to select
+// among the 0-14 tool slots the manual itself uses for toolNum elsewhere.
+//
+// rotateAroundEdge calls this with a tool's own already-read-back calibration
+// (coord, from getToolCoordWithID) purely to reactivate it — not to redefine
+// it — because the controller's active tool can silently diverge from what a
+// command's own toolNum field says (see Config.ToolNum's doc comment in
+// module.go for the general version of this problem).
+// formatSetToolCoord renders a SetToolCoord(...) command's literal text, in
+// the exact 11-argument order of manual Table 5-3-1.
+func formatSetToolCoord(toolNum int, coord [6]float64, toolType, install, loadNo int) string {
+	return fmt.Sprintf("SetToolCoord(%d,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%d,%d,%d,%d)",
+		toolNum, coord[0], coord[1], coord[2], coord[3], coord[4], coord[5], toolType, install, toolNum, loadNo)
+}
+
+func (c *commandClient) setToolCoord(ctx context.Context, toolNum int, coord [6]float64, toolType, install, loadNo int) error {
+	data := formatSetToolCoord(toolNum, coord, toolType, install, loadNo)
+	c.logger.Debugw("setToolCoord: request", "tool_num", toolNum, "coord", coord)
+	resp, err := c.send(ctx, cmdIDSetToolCoord, data)
+	if err != nil {
+		c.logger.Debugw("setToolCoord: send failed", "err", err)
+		return err
+	}
+	err = parseErrcode(resp)
+	c.logger.Debugw("setToolCoord: result", "resp", resp, "err", err)
+	return err
+}
+
+// moveLParams mirrors manual Table 2-6 (MoveL() instruction protocol 1) in
+// field order. Unlike moveJParams, this isn't reused from MoveJ: MoveL has
+// four extra fields (BlendMode, SearchFlag, OAcc, VelAccMode) that MoveJ
+// doesn't, so each command gets its own dedicated struct/formatter, matching
+// this module's existing one-struct-per-wire-command style (moveJParams,
+// moveGripperParams).
+//
+// rotateAroundEdge is this module's only caller, and only ever uses it with
+// Pose == the arm's actual current pose and OffsetFlag == 2 (tool coordinate
+// system) — a pure rotation about the active tool's origin, not a real move.
+type moveLParams struct {
+	Joints [6]float64 // J1..J6, degrees — same IK seed/branch role as moveJParams.Joints
+	Pose   [6]float64 // desc_pos (x,y,z,rx,ry,rz); see moveJParams.Pose's doc comment
+
+	ToolNum      int
+	WorkPieceNum int
+
+	SpeedPercent float64 // 0..100
+	AccelPercent float64 // 0..100
+	OverridePct  int     // ovl, 0..100
+
+	// BlendR: -1 blocks (decelerate to a stop) at this position; [0,1000] is
+	// a non-blocking smooth-radius transition, unit mm. rotateAroundEdge
+	// always sends -1 (block) — there's no multi-waypoint use here.
+	BlendR float64
+	// BlendMode: 0 internal transition, 1 corner-point transition. Only
+	// matters when BlendR != -1; rotateAroundEdge's fixed -1 makes this a
+	// no-op, included for completeness with Table 2-6.
+	BlendMode uint8
+
+	ExAxisPos [4]float64 // no external axes on this arm; always zero
+
+	SearchFlag uint8 // welding-wire search; always 0, not used by this module
+
+	// OffsetFlag: 0 none, 1 workpiece coordinate system, 2 tool coordinate
+	// system, 3 base coordinate system. rotateAroundEdge always sends 2.
+	OffsetFlag uint8
+	Offset     [6]float64 // dt_x,dt_y,dt_z,dt_rx,dt_ry,dt_rz
+
+	OAcc       float64 // acceleration scaling factor for the offset motion
+	VelAccMode uint8   // 0 percentage, 1 physical units (mm/s, mm/s^2)
+}
+
+// formatMoveL renders p as the literal MoveL(...) command text, in the exact
+// 33-argument order of manual Table 2-6.
+func formatMoveL(p moveLParams) string {
+	return fmt.Sprintf(
+		"MoveL(%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,"+ // J1..J6
+			"%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,"+ // x,y,z,rx,ry,rz
+			"%d,%d,"+ // toolNum, workPieceNum
+			"%.4f,%.4f,%d,"+ // speed, acc, ovl
+			"%.4f,%d,"+ // blendR, blendMode
+			"%.4f,%.4f,%.4f,%.4f,"+ // exaxisPos1..4
+			"%d,%d,"+ // search_flag, offset_flag
+			"%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,"+ // dt_x..dt_rz
+			"%.4f,%d)", // oacc, velAccParamMode
+		p.Joints[0], p.Joints[1], p.Joints[2], p.Joints[3], p.Joints[4], p.Joints[5],
+		p.Pose[0], p.Pose[1], p.Pose[2], p.Pose[3], p.Pose[4], p.Pose[5],
+		p.ToolNum, p.WorkPieceNum,
+		p.SpeedPercent, p.AccelPercent, p.OverridePct,
+		p.BlendR, p.BlendMode,
+		p.ExAxisPos[0], p.ExAxisPos[1], p.ExAxisPos[2], p.ExAxisPos[3],
+		p.SearchFlag, p.OffsetFlag,
+		p.Offset[0], p.Offset[1], p.Offset[2], p.Offset[3], p.Offset[4], p.Offset[5],
+		p.OAcc, p.VelAccMode,
+	)
+}
+
+// moveL sends a MoveL() Cartesian move (manual §2.3, CMD_ID 203).
+//
+// Unlike moveJ, whose ack arrives once the move is merely queued (see
+// moveJ's doc comment), MoveL's ack was found on hardware not to return
+// until the physical motion segment completes — confirmed by the script
+// this was ported from (test_fairino_movel.py's SOCKET_TIMEOUT_S comment).
+// Callers must give ctx a deadline that covers the whole physical motion,
+// not just an ack round trip — see rotateAroundEdge (module.go) for the
+// same ctx-deadline-extension pattern moveGripperOnce (gripper.go) already
+// uses for MoveGripper's analogous blocking ack.
+func (c *commandClient) moveL(ctx context.Context, p moveLParams) error {
+	c.logger.Debugw("moveL: params", "joints_deg", p.Joints, "pose", p.Pose,
+		"tool_num", p.ToolNum, "workpiece_num", p.WorkPieceNum,
+		"speed_pct", p.SpeedPercent, "accel_pct", p.AccelPercent, "ovl_pct", p.OverridePct,
+		"blend_r", p.BlendR, "offset_flag", p.OffsetFlag, "offset", p.Offset)
+	resp, err := c.send(ctx, cmdIDMoveL, formatMoveL(p))
+	if err != nil {
+		c.logger.Debugw("moveL: send failed", "err", err)
+		return err
+	}
+	err = parseErrcode(resp)
+	c.logger.Debugw("moveL: result", "resp", resp, "err", err)
+	return err
+}
+
+// axisOffset maps a rotation axis name ("x"/"y"/"z", case-insensitive) to
+// the (dt_rx, dt_ry, dt_rz) MoveL offset triple with degrees in the selected
+// slot and the other two zero. rotateAroundEdge's only tested axis (the
+// script this was ported from) is "x" — the tool's local rx axis, the edge
+// axis in that script's shovel-cubby setup — "y"/"z" extend the same
+// offset-based rotation to the tool frame's other two rotational axes.
+func axisOffset(axis string, degrees float64) (dtRx, dtRy, dtRz float64, err error) {
+	switch strings.ToLower(axis) {
+	case "x":
+		return degrees, 0, 0, nil
+	case "y":
+		return 0, degrees, 0, nil
+	case "z":
+		return 0, 0, degrees, nil
+	default:
+		return 0, 0, 0, fmt.Errorf(`axis must be "x", "y", or "z", got %q`, axis)
+	}
+}
+
 // stop sends STOP (manual §2.35, CMD_ID 102), which halts in-flight motion.
 func (c *commandClient) stop(ctx context.Context) error {
 	c.logger.Debugw("stop: sending STOP")
