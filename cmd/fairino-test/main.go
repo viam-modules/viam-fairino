@@ -13,6 +13,7 @@
 //	joints                       current joint positions (degrees)
 //	jog <joint 1-6> <deltaDeg>   move one joint by delta degrees (blocking MoveJ)
 //	drag on|off                  enter/exit drag-teach (free-drive) mode
+//	rotate <deg> <x|y|z> <speed> rotate the TCP around the active tool frame's origin (MoveL offset)
 //
 //	gripper status               live gripper state from the 8083 status feed
 //	gripper config               configured company/device/software
@@ -66,7 +67,7 @@ func run(host string, args []string) error {
 	logger := logging.NewLogger("fairino-test")
 
 	switch args[0] {
-	case "status", "joints", "jog", "drag":
+	case "status", "joints", "jog", "drag", "rotate":
 		return runArm(ctx, host, logger, args)
 	case "gripper":
 		return runGripper(ctx, host, logger, args[1:])
@@ -140,6 +141,30 @@ func runArm(ctx context.Context, host string, logger logging.Logger, args []stri
 			return err
 		}
 		fmt.Printf("robot_mode=%v program_state=%v\n", st["robot_mode"], st["program_state"])
+		return nil
+
+	case "rotate":
+		if len(args) != 4 {
+			return fmt.Errorf("usage: rotate <degrees> <x|y|z> <speed>")
+		}
+		degrees, err := strconv.ParseFloat(args[1], 64)
+		if err != nil {
+			return fmt.Errorf("bad degrees %q: %w", args[1], err)
+		}
+		axis := args[2]
+		speed, err := strconv.ParseFloat(args[3], 64)
+		if err != nil {
+			return fmt.Errorf("bad speed %q: %w", args[3], err)
+		}
+		res, err := a.DoCommand(ctx, map[string]any{
+			"command": "rotate_around_edge", "degrees": degrees, "axis": axis, "speed": speed,
+		})
+		if err != nil {
+			return err
+		}
+		fmt.Printf("axis=%v\n", res["axis"])
+		fmt.Printf("tcp_pose_before: %v\n", res["tcp_pose_before"])
+		fmt.Printf("tcp_pose_after:  %v\n", res["tcp_pose_after"])
 		return nil
 	}
 	return fmt.Errorf("unknown arm command %q", args[0])
