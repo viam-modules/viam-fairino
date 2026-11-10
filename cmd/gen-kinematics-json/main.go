@@ -30,6 +30,7 @@ type genModel struct {
 var models = []genModel{
 	{"arm/fr5wml.urdf", "arm/fr5wml_kinematics.json", 7},
 	{"arm/fr5.urdf", "arm/fr5_kinematics.json", 7},
+	{"arm/fr20.urdf", "arm/fr20_kinematics.json", 7},
 }
 
 // decimationRatio is the fraction of triangles kept per mesh — applied here

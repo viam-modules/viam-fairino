@@ -10,7 +10,7 @@ import (
 
 // testModels is every model in modelRegistry — the JSON↔URDF agreement tests
 // run against all of them.
-var testModels = []string{ModelFR5, ModelFR5WML}
+var testModels = []string{ModelFR5, ModelFR5WML, ModelFR20}
 
 // buildBothModels returns (jsonModel, urdfModel) for the given model — the
 // default embedded-JSON source and the on-disk URDF source, both derived from
@@ -73,8 +73,8 @@ func TestJSONURDFJointLimitsAgree(t *testing.T) {
 // TestJSONURDFForwardKinematicsAgree guards, for every model, that both
 // kinematics sources produce the same tool pose for the same joint inputs, at
 // the zero pose and a handful of non-trivial poses safely within every joint's
-// limits (+/-20deg per joint has comfortable margin on both models — the
-// tightest limit is FR5's j3 at +/-162deg).
+// limits (+/-20deg per joint has comfortable margin on every model — the
+// tightest limit is FR20's j3 at +/-160deg).
 func TestJSONURDFForwardKinematicsAgree(t *testing.T) {
 	poses := [][]float64{
 		{0, 0, 0, 0, 0, 0},

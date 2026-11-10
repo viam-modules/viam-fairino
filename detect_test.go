@@ -41,9 +41,18 @@ func TestModelFromRobotModel(t *testing.T) {
 		// FR5-WML contains "FR5" too, so WML must win.
 		{"FR5-WML-V1-001", ModelFR5WML, true},
 		{"FR5-wml", ModelFR5WML, true},
+		// FAIRINO's model table lists the FR5-WML as a custom model.
+		{"FRCustom(8)-V1-002(FR5-WML)", ModelFR5WML, true},
+		// The real FR20 reports "FR20-V1-001(V6.0)"; FAIRINO's model table
+		// also lists a V5.0 revision. Matched on the main-model token.
+		{"FR20-V1-001(V6.0)", ModelFR20, true},
+		{"FR20-V1-000(V5.0)", ModelFR20, true},
+		{"fr20", ModelFR20, true},
+		{"FR200-V1-001", "", false},
 		// Unsupported / unknown.
 		{"FR3-V1-001", "", false},
 		{"FR10", "", false},
+		{"FR30-V1-001(V6.0)", "", false},
 		{"", "", false},
 	}
 	for _, tt := range tests {
