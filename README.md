@@ -1,7 +1,8 @@
 # Module viam-fairino
 
-Viam `arm` component module for Fairino collaborative robots. Two robot
-models are supported: the standard **FR5** and the long-reach **FR5-WML**.
+Viam `arm` component module for Fairino collaborative robots. Three robot
+models are supported: the standard **FR5**, the long-reach **FR5-WML**, and
+the **FR20** (see "Supported robot models" below).
 
 The module connects to the controller's status port (TCP 8083, fixed) for
 feedback and the command port (TCP 8080, fixed) for motion, and has a real
@@ -83,7 +84,7 @@ spaced.
 
 This module provides the following model(s):
 
-- `viam-soleng:viam-fairino:fairino` - Fairino arm (FR5 or FR5-WML, auto-selected or selected by the `model` attribute)
+- `viam-soleng:viam-fairino:fairino` - Fairino arm (FR5, FR5-WML, or FR20, auto-selected or selected by the `model` attribute)
 - `viam-soleng:viam-fairino:gripper` - Fairino-configured gripper (generic, percentage-based)
 
 ## Configuration
@@ -98,11 +99,11 @@ This module provides the following model(s):
 | Attribute | Type | Required | Description |
 |---|---|---|---|
 | `host` | string | no | Controller IP address. Defaults to `192.168.58.2` (the Fairino factory default). |
-| `model` | string | no | Which robot's kinematics/meshes to load: `"fr5"` (standard FR5) or `"fr5-wml"` (long-reach FR5-WML). Defaults to auto-detection via the controller's `GetSoftwareVersion`, which requires the robot to be reachable at startup. |
+| `model` | string | no | Which robot's kinematics/meshes to load: `"fr5"` (standard FR5), `"fr5-wml"` (long-reach FR5-WML), or `"fr20"` (FR20). Defaults to auto-detection via the controller's `GetSoftwareVersion`, which requires the robot to be reachable at startup — see "Supported robot models" below. |
 | `tool_num` | int | no | Tool coordinate frame, 0-14, used for `MoveJ`'s toolNum field. Defaults to whatever tool is **currently active on the controller** (read live from the status feed) rather than a fixed value — see "Tool frame" below for why. |
 | `workpiece_num` | int | no | Workpiece coordinate frame, 0-14, used for `MoveJ`'s workPieceNum field. Default 0 (base workpiece). |
 | `joint_speed_percent` | int | no | `MoveJ`'s speed field, 1-100. Default 20 (matches `fairino-python-sdk`'s own `MoveJ` default). |
-| `use_urdf` | bool | no | Use the selected model's on-disk URDF (`arm/fr5.urdf` or `arm/fr5wml.urdf`) as the kinematics source instead of the default embedded JSON. Requires `VIAM_MODULE_ROOT` to be set (true for a normal deployment). JSON is the default because it's the only one the Viam app's joint-limit sliders currently parse correctly. |
+| `use_urdf` | bool | no | Use the selected model's on-disk URDF (`arm/fr5.urdf`, `arm/fr5wml.urdf`, or `arm/fr20.urdf`) as the kinematics source instead of the default embedded JSON. Requires `VIAM_MODULE_ROOT` to be set (true for a normal deployment). JSON is the default because it's the only one the Viam app's joint-limit sliders currently parse correctly. |
 | `mesh_decimation_ratios` | []float | no | Only used when `use_urdf` is true; per-collision-mesh decimation ratios (document order). |
 | `motion` | string | no | Name of the `motion.Service` `MoveToPosition` delegates to. Defaults to this robot's `"builtin"` motion service if available (optional dependency); naming one explicitly makes it a hard dependency instead. See the Cartesian motion section above. |
 | `blend_time_ms` | int | no | `MoveJ`'s non-blocking `blendT` field, 0-500. Default 0 (disabled): every waypoint decelerates to a full stop before the next, the original behavior. A nonzero value blends through every waypoint but the last in a multi-waypoint move (`MoveThroughJointPositions`, and therefore `GoToInputs`/`MoveToPosition` too, since both delegate to it) instead of stopping at each — see the blending caveat below. |
@@ -110,6 +111,17 @@ This module provides the following model(s):
 The controller's ports are fixed by firmware (status 8083, commands 8080) and
 are not configurable. Both the arm and the gripper speak only these two
 documented ports.
+
+### Supported robot models
+
+| `model` | Arm | Auto-detected when the controller's robotModel… | Kinematics/meshes |
+|---|---|---|---|
+| `fr5` | FR5 | contains `FR5` (e.g. `FR5-V1-002(V6.0)`) | vendor `fairino5_v6` URDF — `arm/fr5_SOURCES.md` |
+| `fr5-wml` | FR5-WML | contains `FR5` and `WML` (e.g. `FRCustom(8)-V1-002(FR5-WML)`) | vendor FR5-WML URDF — `arm/fr5wml_SOURCES.md` |
+| `fr20` | FR20 | has main model `FR20` (e.g. `FR20-V1-001(V6.0)`) | vendor `fairino20_v6` URDF plus its flange frame — `arm/fr20_SOURCES.md` |
+
+Any other robotModel fails auto-detection with an error naming the reported
+string; set `model` explicitly only if the arm really is one of the above.
 
 ### Gripper configuration
 

@@ -8,11 +8,12 @@ import (
 )
 
 // wantLinkNames maps each model to the 7 links in its URDF that carry a visual
-// mesh. Both models' URDFs use the vendor's descriptive link names.
+// mesh. Every model's URDF uses the vendor's descriptive link names.
 // Get3DModels keys meshes by these names.
 var wantLinkNames = map[string][]string{
 	ModelFR5WML: {"base_link", "shoulder_link", "upperarm_link", "forearm_link", "wrist1_link", "wrist2_link", "wrist3_link"},
 	ModelFR5:    {"base_link", "shoulder_link", "upperarm_link", "forearm_link", "wrist1_link", "wrist2_link", "wrist3_link"},
+	ModelFR20:   {"base_link", "shoulder_link", "upperarm_link", "forearm_link", "wrist1_link", "wrist2_link", "wrist3_link"},
 }
 
 // newTestArm builds a bare arm struct wired with the given model's visual-mesh

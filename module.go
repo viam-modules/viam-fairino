@@ -1,5 +1,5 @@
-// Package viamfairino implements Fairino FR-series arms (FR5 and FR5-WML,
-// selected via Config.Model) as a Viam arm component.
+// Package viamfairino implements Fairino FR-series arms (FR5, FR5-WML, and
+// FR20, selected via Config.Model) as a Viam arm component.
 //
 // A statusClient (status.go) reads the controller's 8083 status broadcast
 // and backs the read-only arm.Arm methods (JointPositions, CurrentInputs,
@@ -17,10 +17,10 @@
 // MoveToPosition's doc comment for what this requires in the robot's JSON
 // config). Kinematics returns a real link/geometry model (kinematics.go),
 // parsed from the selected model's URDF shipped in the module tarball (see
-// arm/fr5_SOURCES.md / arm/fr5wml_SOURCES.md for provenance); Geometries and
-// Get3DModels both use that same model and its bundled meshes. EndPosition
-// is implemented via forward kinematics (see its own doc comment for the
-// still-open design question). Stop is still stubbed.
+// arm/fr5_SOURCES.md / arm/fr5wml_SOURCES.md / arm/fr20_SOURCES.md for
+// provenance); Geometries and Get3DModels both use that same model and its
+// bundled meshes. EndPosition is implemented via forward kinematics (see its
+// own doc comment for the still-open design question). Stop is still stubbed.
 //
 // The wire protocols use degrees and millimeters (constants.go/status.go/
 // command.go); all conversion to radians/SI happens in this file, at the
@@ -65,11 +65,11 @@ type Config struct {
 	Host string `json:"host,omitempty"`
 
 	// Model selects which robot's kinematics/meshes to load: "fr5" (standard
-	// FR5) or "fr5-wml" (long-reach FR5-WML). Optional: if empty, the model is
-	// auto-detected at construction by querying the controller's
-	// GetSoftwareVersion (see NewFairino/detectModel). Set it explicitly to
-	// override detection or to let the arm construct while the robot is
-	// unreachable. Validated against modelRegistry when non-empty.
+	// FR5), "fr5-wml" (long-reach FR5-WML), or "fr20" (FR20). Optional: if
+	// empty, the model is auto-detected at construction by querying the
+	// controller's GetSoftwareVersion (see NewFairino/detectModel). Set it
+	// explicitly to override detection or to let the arm construct while the
+	// robot is unreachable. Validated against modelRegistry when non-empty.
 	Model string `json:"model,omitempty"`
 
 	// ToolNum selects the tool coordinate frame (manual: 0-14) used for
@@ -1088,8 +1088,8 @@ func rebuildMeshForPLYBug(g spatialmath.Geometry) spatialmath.Geometry {
 // not PLY), keyed by link/frame name (the .glb filename minus extension,
 // e.g. "link6.glb" -> "link6", which matches the URDF's own link names
 // exactly since that's how they were generated — see arm/fr5wml_SOURCES.md /
-// arm/fr5_SOURCES.md). Meshes are read from the selected model's
-// meshVisualDir (set at construction from modelRegistry).
+// arm/fr5_SOURCES.md / arm/fr20_SOURCES.md). Meshes are read from the
+// selected model's meshVisualDir (set at construction from modelRegistry).
 //
 // If VIAM_MODULE_ROOT is unset, logs a warning and returns an empty map
 // with a nil error rather than failing — 3D visualization is simply
