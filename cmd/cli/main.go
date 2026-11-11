@@ -41,7 +41,7 @@ func realMain() error {
 	if err != nil {
 		return err
 	}
-	defer thing.Close(ctx)
+	defer func() { _ = thing.Close(ctx) }()
 
 	for {
 		select {

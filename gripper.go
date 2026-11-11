@@ -583,15 +583,6 @@ func ptrOr(p *int, def int) int {
 	return *p
 }
 
-func intAt(vals []any, i int) int {
-	if i < len(vals) {
-		if n, ok := vals[i].(int); ok {
-			return n
-		}
-	}
-	return 0
-}
-
 func intFromCmd(cmd map[string]any, key string) int {
 	switch v := cmd[key].(type) {
 	case float64: // JSON numbers arrive as float64

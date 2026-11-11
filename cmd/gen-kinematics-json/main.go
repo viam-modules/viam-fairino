@@ -34,8 +34,8 @@ var models = []genModel{
 }
 
 // decimationRatio is the fraction of triangles kept per mesh — applied here
-// (unlike dobot/xarm's URDF-mode decimation) because this file gets
-// go:embedded directly into the binary as the default kinematics source, so
+// (unlike dobot/xarm's URDF-mode decimation) because this file is embedded
+// directly into the binary (go:embed) as the default kinematics source, so
 // its size and parse cost matter in a way the on-disk, opt-in URDF path's
 // don't. Undecimated, the FR5-WML file was 21.5MB (the full STL triangle data
 // re-encoded as bloated ASCII JSON). Tune this and regenerate if the result

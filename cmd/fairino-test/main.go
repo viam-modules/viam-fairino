@@ -82,7 +82,7 @@ func runArm(ctx context.Context, host string, logger logging.Logger, args []stri
 	if err != nil {
 		return err
 	}
-	defer a.Close(ctx)
+	defer func() { _ = a.Close(ctx) }()
 
 	switch args[0] {
 	case "status":
@@ -201,7 +201,7 @@ func runGripper(ctx context.Context, host string, logger logging.Logger, args []
 	if err != nil {
 		return err
 	}
-	defer g.Close(ctx)
+	defer func() { _ = g.Close(ctx) }()
 
 	switch args[0] {
 	case "status":

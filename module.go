@@ -685,7 +685,7 @@ func (s *viamFairinoFairino) waitForMotionComplete(ctx context.Context, targetDe
 			break // motion has started
 		}
 		if ok && fr.EmergencyStop {
-			return errors.New("Fairino controller is e-stopped — motion did not start")
+			return errors.New("controller is e-stopped — motion did not start")
 		}
 		select {
 		case <-startCtx.Done():
@@ -718,10 +718,10 @@ completed:
 			"motion_done", fr.MotionDone, "joint_deg", fr.JointDegs, "target_deg", targetDeg,
 			"error_code", fr.ErrorCode, "e_stop", fr.EmergencyStop)
 		if fr.EmergencyStop {
-			return errors.New("Fairino controller e-stopped during motion")
+			return errors.New("controller e-stopped during motion")
 		}
 		if fr.ErrorCode != 0 && !isWarningCode(fr.ErrorCode) {
-			return fmt.Errorf("Fairino controller reported a fault during motion: %s", faultCodeString(fr.ErrorCode))
+			return fmt.Errorf("controller reported a fault during motion: %s", faultCodeString(fr.ErrorCode))
 		}
 		if fr.MotionDone {
 			if jointsCloseDeg(fr.JointDegs, targetDeg, jointToleranceDeg) {
@@ -864,10 +864,10 @@ func (s *viamFairinoFairino) waitForCartesianMotionDone(ctx context.Context) err
 		fr, ok, _ := s.status.latest()
 		if ok {
 			if fr.EmergencyStop {
-				return errors.New("Fairino controller e-stopped during motion")
+				return errors.New("controller e-stopped during motion")
 			}
 			if fr.ErrorCode != 0 && !isWarningCode(fr.ErrorCode) {
-				return fmt.Errorf("Fairino controller reported a fault during motion: %s", faultCodeString(fr.ErrorCode))
+				return fmt.Errorf("controller reported a fault during motion: %s", faultCodeString(fr.ErrorCode))
 			}
 			if fr.MotionDone {
 				return nil
