@@ -2,7 +2,7 @@
   "$schema": "https://dl.viam.dev/module.schema.json",
   "module_id": "viam-soleng:viam-fairino",
   "visibility": "public",
-  "url": "https://github.com/viam-soleng/viam-fairino",
+  "url": "https://github.com/viam-modules/viam-fairino",
   "description": "Modular arm component for Fairino FR5, FR5-WML, and FR20",
   "applications": null,
   "markdown_link": "README.md",
