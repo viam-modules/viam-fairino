@@ -6,6 +6,7 @@ require (
 	github.com/golang/geo v0.0.0-20230421003525-6adc56603217
 	go.viam.com/api v0.1.603
 	go.viam.com/rdk v1.16.0
+	golang.org/x/sync v0.23.0
 )
 
 require (
@@ -197,7 +198,6 @@ require (
 	golang.org/x/mod v0.41.0 // indirect
 	golang.org/x/net v0.60.0 // indirect
 	golang.org/x/oauth2 v0.36.0 // indirect
-	golang.org/x/sync v0.23.0 // indirect
 	golang.org/x/sys v0.48.0 // indirect
 	golang.org/x/text v0.42.0 // indirect
 	golang.org/x/time v0.15.0 // indirect
