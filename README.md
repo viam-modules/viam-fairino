@@ -185,6 +185,9 @@ go run ./cmd/fairino-test -host <ip> gripper open|close|move <0-100>
 | `Kinematics` / `Geometries` / `Get3DModels` | ✅ real kinematic model (see the mesh/mass-inertia accuracy caveat above) |
 | `EndPosition` | ✅ via forward kinematics — see its doc comment for a still-open design question (device-reported pose vs. FK) |
 | `Stop` | ❌ not implemented |
+| `MoveThroughJointPositionsStreamed` | not implemented (returns gRPC `Unimplemented`) |
+| `Properties` | Cartesian commands supported (via `MoveToPosition`'s motion service); manual mode not |
+| `SetManualMode` / `ManualMode` | not implemented (returns gRPC `Unimplemented`); use the `enter_drag_mode`/`exit_drag_mode` DoCommands |
 
 If the status connection drops, the implemented methods return the connection
 error rather than stale data, and `Status` reports the resource unhealthy. The
