@@ -20,7 +20,7 @@
 // arm/fr5_SOURCES.md / arm/fr5wml_SOURCES.md / arm/fr20_SOURCES.md for
 // provenance); Geometries and Get3DModels both use that same model and its
 // bundled meshes. EndPosition is implemented via forward kinematics (see its
-// own doc comment for the still-open design question). Stop is still stubbed.
+// own doc comment for the still-open design question).
 //
 // The wire protocols use degrees and millimeters (constants.go/status.go/
 // command.go); all conversion to radians/SI happens in this file, at the
@@ -216,6 +216,8 @@ type viamFairinoFairino struct {
 	cmd    *commandClient
 	opMgr  *operation.SingleOperationManager
 
+	moveToPosOps *operation.SingleOperationManager
+
 	cancelCtx  context.Context
 	cancelFunc func()
 }
@@ -329,6 +331,7 @@ func NewFairino(ctx context.Context, deps resource.Dependencies, name resource.N
 		status:        acquireStatusClient(ctx, host, statusPort, logger),
 		cmd:           cmd,
 		opMgr:         operation.NewSingleOperationManager(),
+		moveToPosOps:  operation.NewSingleOperationManager(),
 		cancelCtx:     cancelCtx,
 		cancelFunc:    cancelFunc,
 	}
@@ -399,6 +402,10 @@ func (s *viamFairinoFairino) CurrentInputs(ctx context.Context) ([]referencefram
 // moves reported as done, fold in program_state == running and/or joint-delta
 // detection. See PLAN.md, Risks #3.
 func (s *viamFairinoFairino) IsMoving(ctx context.Context) (bool, error) {
+	// robot_motion_done lags a freshly sent move.
+	if s.opMgr.OpRunning() {
+		return true, nil
+	}
 	fr, ok, err := s.status.latest()
 	if !ok {
 		if err == nil {
@@ -591,8 +598,8 @@ const blendTBlocking = -1
 // previous operation the moment a new one starts, so if this were called
 // per-waypoint from inside a loop that's already under one opMgr operation,
 // each waypoint would immediately cancel the one before it. The public entry
-// points (MoveToJointPositions, MoveToPosition) own the single opMgr.New call
-// for the whole move; this is the shared mechanics underneath.
+// points (MoveToJointPositions, MoveThroughJointPositions) own the single
+// opMgr.New call for the whole move; this is the shared mechanics underneath.
 //
 // blendTBlocking waits for physical completion (statusFrame.MotionDone, joints
 // within tolerance), sending STOP and returning ctx.Err() on cancellation. Any
@@ -668,8 +675,8 @@ func (s *viamFairinoFairino) moveToJointPositionsOnce(ctx context.Context, posit
 // reports the move done (statusFrame.MotionDone) and the joints are within
 // jointToleranceDeg of targetDeg, or returns an error if the controller
 // e-stops or latches a fault mid-move. On ctx cancellation it issues STOP
-// on a fresh short-lived context before returning ctx.Err(), same shape as
-// viam-dobot's waitForMotionCompleteLocked.
+// before returning ctx.Err(), same shape as viam-dobot's
+// waitForMotionCompleteLocked.
 func (s *viamFairinoFairino) waitForMotionComplete(ctx context.Context, targetDeg [6]float64) error {
 	// Per-poll-tick Debug logging of the MotionDone/JointDegs transitions.
 	pollStart := time.Now()
@@ -703,9 +710,7 @@ completed:
 		select {
 		case <-ctx.Done():
 			s.logger.Debugw("waitForMotionComplete: ctx cancelled, sending STOP", "elapsed", time.Since(pollStart), "ctx_err", ctx.Err())
-			stopCtx, cancelStop := context.WithTimeout(context.Background(), 2*time.Second)
-			_ = s.cmd.stop(stopCtx)
-			cancelStop()
+			s.stopAfterFailure(ctx)
 			return ctx.Err()
 		case <-time.After(motionPollInterval):
 		}
@@ -880,10 +885,65 @@ func (s *viamFairinoFairino) waitForCartesianMotionDone(ctx context.Context) err
 		}
 		select {
 		case <-ctx.Done():
-			stopCtx, cancelStop := context.WithTimeout(context.Background(), 2*time.Second)
-			_ = s.cmd.stop(stopCtx)
-			cancelStop()
+			s.stopAfterFailure(ctx)
 			return ctx.Err()
+		case <-time.After(motionPollInterval):
+		}
+	}
+}
+
+func (s *viamFairinoFairino) stopAfterFailure(ctx context.Context) {
+	if err := s.cmd.stop(ctx); err != nil {
+		s.logger.Errorw("STOP failed; the arm may still be moving", "err", err)
+	}
+}
+
+const (
+	stopRestTimeout  = 3 * time.Second
+	restFrames       = 3
+	restToleranceDeg = 0.05
+)
+
+// errRestNotConfirmed means STOP was acknowledged but the status feed never
+// showed the arm at rest, as opposed to STOP itself failing.
+var errRestNotConfirmed = errors.New("STOP acknowledged but the arm was not confirmed at rest")
+
+// waitForRest returns once the joints hold still across restFrames new status
+// frames. Polling alone can't tell: a frame only arrives every feedback period.
+func (s *viamFairinoFairino) waitForRest(ctx context.Context) error {
+	restCtx, cancel := context.WithTimeout(ctx, stopRestTimeout)
+	defer cancel()
+	var (
+		last    statusFrame
+		have    bool
+		still   int
+		feedErr error
+	)
+	for {
+		fr, ok, err := s.status.latest()
+		if err != nil {
+			feedErr = err
+		} else if ok && (!have || fr.FrameCount != last.FrameCount) {
+			if have && jointsCloseDeg(fr.JointDegs, last.JointDegs, restToleranceDeg) {
+				still++
+				if still >= restFrames {
+					return nil
+				}
+			} else {
+				still = 0
+			}
+			last, have = fr, true
+		}
+		select {
+		case <-restCtx.Done():
+			switch {
+			case ctx.Err() != nil:
+				return fmt.Errorf("%w: the caller's deadline ran out first: %w", errRestNotConfirmed, ctx.Err())
+			case feedErr != nil:
+				return fmt.Errorf("%w within %v; last status feed error: %w", errRestNotConfirmed, stopRestTimeout, feedErr)
+			default:
+				return fmt.Errorf("%w: joints still moving after %v", errRestNotConfirmed, stopRestTimeout)
+			}
 		case <-time.After(motionPollInterval):
 		}
 	}
@@ -917,13 +977,6 @@ func (s *viamFairinoFairino) Close(context.Context) error {
 	s.cancelFunc()
 	return nil
 }
-
-// ---------- stubbed methods ----------
-
-// errPhase2 marks Stop, the one remaining stubbed method. Everything else
-// that needs the command port (MoveToJointPositions, MoveThroughJointPositions,
-// MoveToPosition, GoToInputs) is implemented.
-var errPhase2 = errors.New("not implemented yet; motion via the command port is planned but not yet built for this method")
 
 // EndPosition returns the current position of the arm, computed via the
 // kinematic model's forward kinematics (kinematics.go) from the current
@@ -971,7 +1024,8 @@ func (s *viamFairinoFairino) MoveToPosition(ctx context.Context, pose spatialmat
 	if s.motion == nil {
 		return errors.New("fairino cannot do MoveToPosition without a motion service available (see MoveToPosition's doc comment)")
 	}
-	ctx, done := s.opMgr.New(ctx)
+	// Not opMgr: the plan runs through GoToInputs, which takes opMgr and would cancel this call.
+	ctx, done := s.moveToPosOps.New(ctx)
 	defer done()
 	_, err := s.motion.Move(ctx, motion.MoveReq{
 		ComponentName: s.Name().Name,
@@ -981,11 +1035,7 @@ func (s *viamFairinoFairino) MoveToPosition(ctx context.Context, pose spatialmat
 }
 
 // MoveThroughJointPositions moves the arm's joints through the given
-// positions in order, via moveToJointPositionsOnce per waypoint. Doesn't
-// call s.opMgr.New itself — see that method's doc comment for why — so a
-// direct caller other than MoveToPosition or GoToInputs (which wrap one
-// operation around the whole sequence) runs without single-operation
-// protection.
+// positions in order, via moveToJointPositionsOnce per waypoint.
 //
 // options (MaxVelRads/MaxAccRads) isn't consumed: this module's command
 // protocol only has a single fixed per-config speed (Config.JointSpeedPercent).
@@ -997,6 +1047,8 @@ func (s *viamFairinoFairino) MoveToPosition(ctx context.Context, pose spatialmat
 // trajectories, since they delegate here too — see the README for the
 // resulting "cut corner" caveat.
 func (s *viamFairinoFairino) MoveThroughJointPositions(ctx context.Context, positions [][]referenceframe.Input, options *arm.MoveOptions, extra map[string]interface{}) error {
+	ctx, done := s.opMgr.New(ctx)
+	defer done()
 	for i, goal := range positions {
 		// The last waypoint always blocks; intermediate waypoints blend when
 		// Config.BlendTimeMs is set, otherwise they block too.
@@ -1005,6 +1057,9 @@ func (s *viamFairinoFairino) MoveThroughJointPositions(ctx context.Context, posi
 			blendT = float64(s.cfg.BlendTimeMs)
 		}
 		if err := s.moveToJointPositionsOnce(ctx, goal, blendT); err != nil {
+			if i > 0 && s.cfg.BlendTimeMs > 0 {
+				s.stopAfterFailure(ctx)
+			}
 			return fmt.Errorf("waypoint %d/%d: %w", i+1, len(positions), err)
 		}
 	}
@@ -1022,7 +1077,21 @@ func (s *viamFairinoFairino) GoToInputs(ctx context.Context, inputSteps ...[]ref
 }
 
 func (s *viamFairinoFairino) Stop(ctx context.Context, extra map[string]interface{}) error {
-	return errPhase2
+	// Holding both slots until the arm is at rest makes a new move wait for the stop
+	// instead of starting mid-stop; their contexts go unused so that move can't cut it short.
+	_, donePlanning := s.moveToPosOps.New(ctx)
+	defer donePlanning()
+	_, done := s.opMgr.New(ctx)
+	defer done()
+	if err := s.cmd.stop(ctx); err != nil {
+		return err
+	}
+	if err := s.waitForRest(ctx); err != nil {
+		// STOP took effect; only the confirmation is missing. Over gRPC a caller
+		// can't tell that error apart from STOP failing, so it stays a warning.
+		s.logger.Warnw("STOP acknowledged but the arm was not confirmed at rest", "err", err)
+	}
+	return nil
 }
 
 func (s *viamFairinoFairino) MoveThroughJointPositionsStreamed(

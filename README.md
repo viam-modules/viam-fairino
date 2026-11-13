@@ -10,7 +10,7 @@ kinematic model (`Kinematics`/`Geometries`/`Get3DModels`, including 3D-scene
 rendering in the Viam app). **The kinematic model's link lengths are
 CAD-corrected but its meshes and mass/inertia are still known-inaccurate
 placeholders**, pending the correct source files for this exact arm variant
-(FR5-WML). `Stop` remains unimplemented.
+(FR5-WML).
 
 ## Cartesian motion (`MoveToPosition`) requires a `"frame"` config block
 
@@ -175,7 +175,7 @@ go run ./cmd/fairino-test -host <ip> gripper open|close|move <0-100>
 | Method | Status |
 |---|---|
 | `JointPositions` / `CurrentInputs` | ✅ live from the 8083 status stream |
-| `IsMoving` | ✅ from `robot_motion_done` (may not register pendant/drag motion yet) |
+| `IsMoving` | true while a move or `Stop` is in progress, otherwise from `robot_motion_done` (may not register pendant/drag motion yet) |
 | `Status` | ✅ connection health + decoded controller state |
 | `DoCommand` | ✅ `{"command": "status"}`, `"enter_drag_mode"`, `"exit_drag_mode"`, `"rotate_around_edge"` (see below) |
 | `MoveToJointPositions` | ✅ single blocking `MoveJ` |
@@ -184,7 +184,7 @@ go run ./cmd/fairino-test -host <ip> gripper open|close|move <0-100>
 | `GoToInputs` | ✅ delegates to `MoveThroughJointPositions` (this is what the motion service's plan executor actually calls) |
 | `Kinematics` / `Geometries` / `Get3DModels` | ✅ real kinematic model (see the mesh/mass-inertia accuracy caveat above) |
 | `EndPosition` | ✅ via forward kinematics — see its doc comment for a still-open design question (device-reported pose vs. FK) |
-| `Stop` | ❌ not implemented |
+| `Stop` | cancels the in-flight joint move or `MoveToPosition`, sends `STOP`, and returns once the joints stop moving. New moves wait until it finishes. See "Stop" below |
 | `MoveThroughJointPositionsStreamed` | not implemented (returns gRPC `Unimplemented`) |
 | `Properties` | Cartesian commands supported (via `MoveToPosition`'s motion service); manual mode not |
 | `SetManualMode` / `ManualMode` | not implemented (returns gRPC `Unimplemented`); use the `enter_drag_mode`/`exit_drag_mode` DoCommands |
@@ -192,6 +192,18 @@ go run ./cmd/fairino-test -host <ip> gripper open|close|move <0-100>
 If the status connection drops, the implemented methods return the connection
 error rather than stale data, and `Status` reports the resource unhealthy. The
 reader reconnects automatically with backoff.
+
+### Stop
+
+`Stop` halts the real arm whenever anything calls it: the app's stop button,
+a stop-all, or viam-server when a client session expires mid-move. It returns
+once the status feed shows the joints holding still; if that isn't confirmed
+within 3 s it logs a warning and returns anyway. It returns an error only when
+`STOP` itself didn't reach the controller.
+
+The arm and gripper share one controller connection, and `rotate_around_edge`'s
+`MoveL` and a gripper `Open`/`Grab` hold it until their motion finishes. A
+`Stop` during either can't get `STOP` out and returns an error after 2 s.
 
 ## DoCommand
 
