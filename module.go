@@ -39,6 +39,7 @@ import (
 
 	commonpb "go.viam.com/api/common/v1"
 	arm "go.viam.com/rdk/components/arm"
+	rdkgrpc "go.viam.com/rdk/grpc"
 	"go.viam.com/rdk/logging"
 	"go.viam.com/rdk/operation"
 	"go.viam.com/rdk/referenceframe"
@@ -1022,6 +1023,27 @@ func (s *viamFairinoFairino) GoToInputs(ctx context.Context, inputSteps ...[]ref
 
 func (s *viamFairinoFairino) Stop(ctx context.Context, extra map[string]interface{}) error {
 	return errPhase2
+}
+
+func (s *viamFairinoFairino) MoveThroughJointPositionsStreamed(
+	ctx context.Context,
+	batches <-chan []arm.TrajectoryPoint,
+	responses chan<- arm.Response,
+	extra map[string]interface{},
+) error {
+	return rdkgrpc.UnimplementedError
+}
+
+func (s *viamFairinoFairino) Properties(ctx context.Context, extra map[string]interface{}) (arm.Properties, error) {
+	return arm.Properties{SupportCartesianCommands: true}, nil
+}
+
+func (s *viamFairinoFairino) SetManualMode(ctx context.Context, manualMode bool, enabledFor time.Duration, extra map[string]interface{}) error {
+	return rdkgrpc.UnimplementedError
+}
+
+func (s *viamFairinoFairino) ManualMode(ctx context.Context, extra map[string]interface{}) (bool, error) {
+	return false, rdkgrpc.UnimplementedError
 }
 
 // Kinematics returns the selected model's kinematic model, built once at
