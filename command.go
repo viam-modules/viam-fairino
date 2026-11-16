@@ -44,6 +44,7 @@ import (
 	"time"
 
 	"go.viam.com/rdk/logging"
+	"golang.org/x/sync/semaphore"
 )
 
 const (
@@ -53,6 +54,7 @@ const (
 	// deadline. It only covers the command being queued, not the physical
 	// motion — completion is tracked separately by polling the status port.
 	cmdReadTimeout = 10 * time.Second
+	stopAckTimeout = 2 * time.Second
 
 	// cmdMaxFrameLen caps how much we'll buffer in readFrame while scanning
 	// for a "/b/f" terminator that never arrives (corrupt stream, wrong
@@ -69,7 +71,7 @@ type commandClient struct {
 	port   int
 	logger logging.Logger
 
-	mu sync.Mutex // serializes one in-flight request
+	reqSem *semaphore.Weighted
 
 	connMu sync.RWMutex
 	conn   net.Conn
@@ -79,7 +81,7 @@ type commandClient struct {
 }
 
 func newCommandClient(host string, port int, logger logging.Logger) *commandClient {
-	return &commandClient{host: host, port: port, logger: logger}
+	return &commandClient{host: host, port: port, logger: logger, reqSem: semaphore.NewWeighted(1)}
 }
 
 // ---------------------------------------------------------------------------
@@ -181,14 +183,35 @@ func (c *commandClient) close() error {
 	return nil
 }
 
+// errConnDropped marks a socket failure; send has closed the connection, so the next send redials.
+var errConnDropped = errors.New("command connection dropped")
+
 // send transmits one command frame and returns the parsed response DATA
 // field. data is the full command text, e.g. "MoveJ(1,2,3,...)" or "STOP" —
 // callers build that string (see moveJ/stop below), send just handles
 // framing, the connection, and response correlation.
 func (c *commandClient) send(ctx context.Context, cmdID int, data string) (string, error) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
+	if err := c.acquire(ctx); err != nil {
+		return "", err
+	}
+	defer c.reqSem.Release(1)
+	return c.sendLocked(ctx, cmdID, data)
+}
 
+// acquire's nil return must be paired with reqSem.Release(1).
+func (c *commandClient) acquire(ctx context.Context) error {
+	if err := c.reqSem.Acquire(ctx, 1); err != nil {
+		return err
+	}
+	// Acquire can succeed on a done ctx, and a cancelled move queued behind a STOP must not go out after it.
+	if err := ctx.Err(); err != nil {
+		c.reqSem.Release(1)
+		return err
+	}
+	return nil
+}
+
+func (c *commandClient) sendLocked(ctx context.Context, cmdID int, data string) (string, error) {
 	c.connMu.RLock()
 	conn := c.conn
 	c.connMu.RUnlock()
@@ -221,7 +244,7 @@ func (c *commandClient) send(ctx context.Context, cmdID int, data string) (strin
 	if _, err := conn.Write([]byte(frame)); err != nil {
 		c.logger.Debugw("command port: write failed", "cnt", reqCnt, "cmd_id", cmdID, "err", err)
 		_ = c.close()
-		return "", fmt.Errorf("command write %q: %w", data, err)
+		return "", fmt.Errorf("command write %q: %w: %w", data, errConnDropped, err)
 	}
 
 	c.connMu.RLock()
@@ -231,7 +254,7 @@ func (c *commandClient) send(ctx context.Context, cmdID int, data string) (strin
 	if err != nil {
 		c.logger.Debugw("command port: read failed", "cnt", reqCnt, "cmd_id", cmdID, "elapsed", time.Since(sendStart), "err", err)
 		_ = c.close()
-		return "", fmt.Errorf("command read response to %q: %w", data, err)
+		return "", fmt.Errorf("command read response to %q: %w: %w", data, errConnDropped, err)
 	}
 	c.logger.Debugw("command port: received raw frame", "cnt", reqCnt, "cmd_id", cmdID, "raw", string(raw), "elapsed", time.Since(sendStart))
 
@@ -713,7 +736,19 @@ func axisOffset(axis string, degrees float64) (dtRx, dtRy, dtRz float64, err err
 // stop sends STOP (manual §2.35, CMD_ID 102), which halts in-flight motion.
 func (c *commandClient) stop(ctx context.Context) error {
 	c.logger.Debugw("stop: sending STOP")
-	resp, err := c.send(ctx, cmdIDStop, "STOP")
+	// Its own deadline, so a cancelled caller can't keep STOP from going out.
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), stopAckTimeout)
+	defer cancel()
+	// Held across both attempts so a queued command can't go out between them.
+	if err := c.acquire(ctx); err != nil {
+		return err
+	}
+	defer c.reqSem.Release(1)
+	resp, err := c.sendLocked(ctx, cmdIDStop, "STOP")
+	if errors.Is(err, errConnDropped) && ctx.Err() == nil {
+		c.logger.Warnw("STOP failed on a dead connection; retrying on a fresh one", "err", err)
+		resp, err = c.sendLocked(ctx, cmdIDStop, "STOP")
+	}
 	if err != nil {
 		c.logger.Debugw("stop: send failed", "err", err)
 		return err
