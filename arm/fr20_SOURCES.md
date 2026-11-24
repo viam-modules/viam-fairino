@@ -14,7 +14,8 @@ It is the vendor's SolidWorks export, used **unmodified** except for:
   - visual → `meshes/fr20/visual/*.glb` — the vendor CAD meshes
     (`fairino_description/meshes/fairino20_v6/*.STL`) converted to glTF with
     trimesh for the app's 3D scene viewer (`Get3DModels`), same as the FR5's.
-  - collision → `meshes/fr20/collision/*.STL` — the vendor CAD meshes, as-is.
+  - collision → `meshes/fr20/collision/*.STL` — CoACD convex decompositions of
+    the vendor CAD meshes (see below), not the CAD itself.
 - A fixed `joint_eef` → `link_eef` flange frame appended 120 mm along
   `wrist3_link`'s z. The vendor URDF ends at the J6 axis and has no frame for
   the DH table's d6, so without it forward kinematics stops 120 mm short of the
@@ -43,6 +44,14 @@ The J1/J5/J6 ranges also match the manual's FR20 movement-range figure
 `fr20v6_ros2_control/urdf/fr20v6.urdf`) has identical link offsets and axes
 but gives J3 as +/-162 deg — the FR5's value, apparently copied over. This
 module uses `frcobot_ros2`'s more conservative +/-160 deg.
+
+## Collision meshes
+
+CoACD convex hulls from [Space-Robotics-Workers/frcobot_ros2 #1](https://github.com/Space-Robotics-Workers/frcobot_ros2/pull/1)
+(`fairino_description/meshes/fairino20_v6/collision/<link>_collision.stl`), embedded
+undecimated. They replace the vendor CAD decimated to 10%, which reported false
+forearm–wrist2 collisions. Versus the CAD: up to 31 mm larger where they fill
+concavities; a few CAD vertices sit up to 3.2 mm outside them (forearm).
 
 ## Sources
 
