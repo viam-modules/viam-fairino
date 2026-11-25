@@ -24,23 +24,25 @@ type genModel struct {
 	urdfPath           string
 	jsonPath           string
 	numCollisionMeshes int
+	decimationRatio    float64
 }
 
 // models must stay in sync with viamfairino's modelRegistry (kinematics.go).
 var models = []genModel{
-	{"arm/fr5wml.urdf", "arm/fr5wml_kinematics.json", 7},
-	{"arm/fr5.urdf", "arm/fr5_kinematics.json", 7},
-	{"arm/fr20.urdf", "arm/fr20_kinematics.json", 7},
+	{"arm/fr5wml.urdf", "arm/fr5wml_kinematics.json", 7, vendorCADDecimationRatio},
+	{"arm/fr5.urdf", "arm/fr5_kinematics.json", 7, vendorCADDecimationRatio},
+	// Already small convex hulls; decimating them would only distort them.
+	{"arm/fr20.urdf", "arm/fr20_kinematics.json", 7, 1},
 }
 
-// decimationRatio is the fraction of triangles kept per mesh — applied here
+// vendorCADDecimationRatio is the fraction of triangles kept per vendor CAD mesh — applied here
 // (unlike dobot/xarm's URDF-mode decimation) because this file is embedded
 // directly into the binary (go:embed) as the default kinematics source, so
 // its size and parse cost matter in a way the on-disk, opt-in URDF path's
 // don't. Undecimated, the FR5-WML file was 21.5MB (the full STL triangle data
 // re-encoded as bloated ASCII JSON). Tune this and regenerate if the result
 // is still too large/slow, or too coarse for collision purposes.
-const decimationRatio = 0.1
+const vendorCADDecimationRatio = 0.1
 
 func main() {
 	if err := run(); err != nil {
@@ -61,7 +63,7 @@ func run() error {
 func genOne(m genModel) error {
 	ratios := make([]float64, m.numCollisionMeshes)
 	for i := range ratios {
-		ratios[i] = decimationRatio
+		ratios[i] = m.decimationRatio
 	}
 
 	model, err := referenceframe.ParseModelXMLFile(m.urdfPath, "fairino", ratios)

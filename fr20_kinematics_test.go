@@ -2,6 +2,7 @@ package viamfairino
 
 import (
 	"math"
+	"strings"
 	"testing"
 
 	"github.com/golang/geo/r3"
@@ -104,6 +105,37 @@ func TestFR20MatchesController(t *testing.T) {
 		)
 		if mm, deg := poseError(want, got); mm > 2.5 || deg > 0.01 {
 			t.Errorf("at %v deg: off the controller's pose by %.3f mm / %.4f deg", s.jointsDeg, mm, deg)
+		}
+	}
+}
+
+// The vendor CAD keeps these links ~21 mm apart here; the old 10%-decimated meshes reported a collision.
+func TestFR20ForearmClearsWrist2(t *testing.T) {
+	jsonModel, urdfModel := buildBothModels(t, ModelFR20)
+	inputs := []referenceframe.Input{-1.68, -2.03, -0.62, -3.86, -1.22, -1.49}
+	for name, m := range map[string]referenceframe.Model{"json": jsonModel, "urdf": urdfModel} {
+		gif, err := m.Geometries(inputs)
+		if err != nil {
+			t.Fatalf("%s: Geometries: %v", name, err)
+		}
+		var forearm, wrist2 spatialmath.Geometry
+		for _, g := range gif.Geometries() {
+			switch {
+			case strings.HasSuffix(g.Label(), "forearm_link"):
+				forearm = g
+			case strings.HasSuffix(g.Label(), "wrist2_link"):
+				wrist2 = g
+			}
+		}
+		if forearm == nil || wrist2 == nil {
+			t.Fatalf("%s: forearm_link or wrist2_link geometry missing", name)
+		}
+		collides, _, err := forearm.CollidesWith(wrist2, 0)
+		if err != nil {
+			t.Fatalf("%s: CollidesWith: %v", name, err)
+		}
+		if collides {
+			t.Errorf("%s: forearm_link collides with wrist2_link at %v", name, inputs)
 		}
 	}
 }
