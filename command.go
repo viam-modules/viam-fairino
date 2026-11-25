@@ -758,6 +758,23 @@ func (c *commandClient) stop(ctx context.Context) error {
 	return err
 }
 
+// formatServoJ fills ServoJ's external-axis, acc, vel, filterTime and posGain
+// fields with zeros; the manual marks acc/vel/filterTime/posGain unavailable.
+func formatServoJ(jointsDeg [6]float64, interval time.Duration) string {
+	return fmt.Sprintf("ServoJ(%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,0.000,0.000,0.000,0.000,0,0,%.4f,0,0)",
+		jointsDeg[0], jointsDeg[1], jointsDeg[2], jointsDeg[3], jointsDeg[4], jointsDeg[5], interval.Seconds())
+}
+
+// servoJ sends one ServoJ setpoint (manual §2.5, CMD_ID 376), which the arm
+// reaches over interval.
+func (c *commandClient) servoJ(ctx context.Context, jointsDeg [6]float64, interval time.Duration) error {
+	resp, err := c.send(ctx, cmdIDServoJ, formatServoJ(jointsDeg, interval))
+	if err != nil {
+		return err
+	}
+	return parseErrcode(resp)
+}
+
 // ---------------------------------------------------------------------------
 // Gripper commands (manual chapter 7.1, "Robot peripheral instructions").
 //

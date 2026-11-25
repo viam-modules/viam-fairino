@@ -23,6 +23,7 @@ type fakeCommandPort struct {
 
 	mu             sync.Mutex
 	received       []int
+	data           []string
 	at             []time.Time
 	fwdKin         int
 	failFwdKinFrom int
@@ -58,13 +59,14 @@ func (f *fakeCommandPort) serve(conn net.Conn) {
 		if err != nil {
 			return
 		}
-		cnt, cmdID, _, err := decodeCmdFrame(raw)
+		cnt, cmdID, data, err := decodeCmdFrame(raw)
 		if err != nil {
 			return
 		}
 		respID, respData := cmdID, "1"
 		f.mu.Lock()
 		f.received = append(f.received, cmdID)
+		f.data = append(f.data, data)
 		f.at = append(f.at, time.Now())
 		if cmdID == cmdIDGetForwardKin {
 			f.fwdKin++
@@ -138,10 +140,15 @@ func newMotionTestArm(t *testing.T, f *fakeCommandPort, fr statusFrame, cfg Conf
 	cfg.ToolNum = &toolNum
 	cmd := newCommandClient("127.0.0.1", f.port(), logger)
 	t.Cleanup(func() { _ = cmd.close() })
+	model, err := makeModelFrame("test", ModelFR20, false, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
 	return &viamFairinoFairino{
 		name:         arm.Named("test"),
 		logger:       logger,
 		cfg:          &cfg,
+		model:        model,
 		status:       sc,
 		cmd:          cmd,
 		opMgr:        operation.NewSingleOperationManager(),

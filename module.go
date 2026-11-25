@@ -723,11 +723,8 @@ completed:
 		s.logger.Debugw("waitForMotionComplete: completion poll", "elapsed", time.Since(pollStart),
 			"motion_done", fr.MotionDone, "joint_deg", fr.JointDegs, "target_deg", targetDeg,
 			"error_code", fr.ErrorCode, "e_stop", fr.EmergencyStop)
-		if fr.EmergencyStop {
-			return errors.New("controller e-stopped during motion")
-		}
-		if fr.ErrorCode != 0 && !isWarningCode(fr.ErrorCode) {
-			return fmt.Errorf("controller reported a fault during motion: %s", faultCodeString(fr.ErrorCode))
+		if err := motionFault(fr); err != nil {
+			return err
 		}
 		if fr.MotionDone {
 			if jointsCloseDeg(fr.JointDegs, targetDeg, jointToleranceDeg) {
@@ -869,11 +866,8 @@ func (s *viamFairinoFairino) waitForCartesianMotionDone(ctx context.Context) err
 	for {
 		fr, ok, _ := s.status.latest()
 		if ok {
-			if fr.EmergencyStop {
-				return errors.New("controller e-stopped during motion")
-			}
-			if fr.ErrorCode != 0 && !isWarningCode(fr.ErrorCode) {
-				return fmt.Errorf("controller reported a fault during motion: %s", faultCodeString(fr.ErrorCode))
+			if err := motionFault(fr); err != nil {
+				return err
 			}
 			if fr.MotionDone {
 				return nil
@@ -890,6 +884,16 @@ func (s *viamFairinoFairino) waitForCartesianMotionDone(ctx context.Context) err
 		case <-time.After(motionPollInterval):
 		}
 	}
+}
+
+func motionFault(fr statusFrame) error {
+	if fr.EmergencyStop {
+		return errors.New("controller e-stopped during motion")
+	}
+	if fr.ErrorCode != 0 && !isWarningCode(fr.ErrorCode) {
+		return fmt.Errorf("controller reported a fault during motion: %s", faultCodeString(fr.ErrorCode))
+	}
+	return nil
 }
 
 func (s *viamFairinoFairino) stopAfterFailure(ctx context.Context) {
@@ -1097,15 +1101,6 @@ func (s *viamFairinoFairino) Stop(ctx context.Context, extra map[string]interfac
 		s.logger.Warnw("STOP acknowledged but the arm was not confirmed at rest", "err", err)
 	}
 	return nil
-}
-
-func (s *viamFairinoFairino) MoveThroughJointPositionsStreamed(
-	ctx context.Context,
-	batches <-chan []arm.TrajectoryPoint,
-	responses chan<- arm.Response,
-	extra map[string]interface{},
-) error {
-	return rdkgrpc.UnimplementedError
 }
 
 func (s *viamFairinoFairino) Properties(ctx context.Context, extra map[string]interface{}) (arm.Properties, error) {

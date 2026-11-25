@@ -185,7 +185,7 @@ go run ./cmd/fairino-test -host <ip> gripper open|close|move <0-100>
 | `Kinematics` / `Geometries` / `Get3DModels` | ✅ real kinematic model (see the mesh/mass-inertia accuracy caveat above) |
 | `EndPosition` | ✅ via forward kinematics — see its doc comment for a still-open design question (device-reported pose vs. FK) |
 | `Stop` | sends `STOP` and returns once the joints stop moving |
-| `MoveThroughJointPositionsStreamed` | not implemented (returns gRPC `Unimplemented`) |
+| `MoveThroughJointPositionsStreamed` | one `ServoJ` (CMD_ID 376) per point, paced by each point's time; gaps over 8 ms are split. Rejects a stream that doesn't start at rest where the arm is, leaves the joint limits, or moves a joint faster than 180°/s, and sends `STOP` on any failure after motion starts |
 | `Properties` | Cartesian commands supported (via `MoveToPosition`'s motion service); manual mode not |
 | `SetManualMode` / `ManualMode` | not implemented (returns gRPC `Unimplemented`); use the `enter_drag_mode`/`exit_drag_mode` DoCommands |
 

@@ -306,6 +306,7 @@ const (
 const (
 	cmdIDMoveJ         = 201 // manual §2.1, Table 2-1
 	cmdIDMoveL         = 203 // manual §2.3, Table 2-6
+	cmdIDServoJ        = 376 // manual §2.5, Table 2-10
 	cmdIDStop          = 102 // manual §2.35, Table 2-48
 	cmdIDGetForwardKin = 377 // manual §6.3.24, Table 6-3-24
 
